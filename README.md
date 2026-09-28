@@ -1,4 +1,4 @@
-# 🦁 Kanha — LLM + LAM from Scratch
+# Typo — LLM + LAM from Scratch
 
 A **decoder-only transformer language model** and a **Language Action Model (LAM)** built entirely from scratch — custom tokenizer, architecture, pretraining, SFT, DPO, LoRA, RAG, tool-calling, **and a full agentic task-management system powered by LangGraph** — with a CLI and FastAPI server on top.
 
@@ -8,7 +8,7 @@ Every component (tokenizer, model, training loops, inference engine, action envi
 
 ---
 
-## ✨ What's in here
+##  What's in here
 
 | Layer | What it does | Key files |
 |---|---|---|
@@ -26,7 +26,7 @@ Every component (tokenizer, model, training loops, inference engine, action envi
 
 ---
 
-## 🧠 The LAM — Kanha Tasks
+## The LAM — Tyro Tasks
 
 The **Language Action Model** is the headline feature: a natural-language task manager where the small 42M-param model operates a real task store through structured actions.
 
@@ -84,91 +84,7 @@ Two backends available:
 
 ---
 
-## 📁 Project Structure
-
-```
-├── config.yaml                    # All hyperparameters
-├── main.py                        # Unified CLI entry point
-├── api.py                         # FastAPI server
-├── cli.py                         # Interactive REPL
-├── requirements.txt
-│
-├── kanha/
-│   ├── core/
-│   │   ├── model.py               # KanhaModel (decoder-only transformer)
-│   │   ├── layers.py              # RMSNorm, RoPE, MHA, SwiGLU, TransformerBlock
-│   │   ├── tokenizer.py           # SentencePiece BPE wrapper
-│   │   ├── generation.py          # Autoregressive generation with KV cache
-│   │   └── lora.py                # LoRA adapters
-│   │
-│   ├── training/
-│   │   └── train.py               # Pretraining loop
-│   │
-│   ├── finetune/
-│   │   ├── sft_train.py           # Supervised fine-tuning
-│   │   ├── dpo_train.py           # DPO alignment
-│   │   └── lam_train.py           # LAM SFT (action sequences)
-│   │
-│   ├── prompting/
-│   │   └── builder.py             # Prompt templates (SFT + LAM)
-│   │
-│   ├── inference/
-│   │   └── engine.py              # InferenceEngine with chat()
-│   │
-│   ├── rag/                       # Retrieval-augmented generation
-│   │   ├── chunker.py
-│   │   ├── retriever.py
-│   │   └── vector_store.py
-│   │
-│   ├── tools/                     # Tool calling
-│   │   ├── calculator.py
-│   │   ├── search.py
-│   │   └── router.py
-│   │
-│   ├── memory/
-│   │   └── short_term.py          # Conversation memory
-│   │
-│   ├── lam/                       # ★ Language Action Model
-│   │   ├── task_store.py          # Task dataclass + JSON store + undo
-│   │   ├── actions.py             # 12-action schema, parser, validator, executor
-│   │   ├── environment.py         # Gym-like TaskEnvironment
-│   │   ├── trajectory.py          # Trajectory formatting + PyTorch datasets
-│   │   ├── agent.py               # Base TaskAgent (no deps)
-│   │   ├── agent_cli.py           # Interactive REPL for LAM
-│   │   ├── evaluator.py           # State-based evaluation framework
-│   │   │
-│   │   ├── data/                  # Synthetic data generation
-│   │   │   ├── templates.py       # 100+ goal templates across 8 tiers
-│   │   │   ├── oracle.py          # Programmatic gold-standard solver
-│   │   │   └── generator.py       # Trajectory generator + train/val/test split
-│   │   │
-│   │   └── langchain/             # ★ LangChain / LangGraph integration
-│   │       ├── model.py           # KanhaLLM (BaseLLM wrapper)
-│   │       ├── tools.py           # 12 StructuredTool wrappers
-│   │       └── graph.py           # LangGraph StateGraph agent
-│   │
-│   └── utils/
-│       ├── config.py              # YAML config singleton
-│       ├── helpers.py             # Device detection, counting
-│       └── logging.py             # Logging setup
-│
-├── scripts/
-│   ├── train_tokenizer.py         # Train BPE tokenizer
-│   ├── download_datasets.py       # Download training data
-│   ├── preprocess_data.py         # Preprocess and chunk data
-│   ├── build_index.py             # Build FAISS index for RAG
-│   ├── generate_lam_data.py       # Generate synthetic LAM training data
-│   └── evaluate_lam.py            # Run LAM evaluation suite
-│
-└── tests/
-    ├── test_model.py              # Core model tests
-    ├── test_rag.py                # RAG tests
-    └── test_lam.py                # LAM + LangGraph tests (60+ tests)
-```
-
----
-
-## 🚀 Quick Start
+##  Quick Start
 
 ### 1. Install
 
@@ -307,7 +223,7 @@ flowchart LR
 
 ---
 
-## 🧪 Testing
+##  Testing
 
 ```bash
 # Run all LAM tests
@@ -328,7 +244,7 @@ The test suite (`tests/test_lam.py`) covers:
 
 ---
 
-## 🔧 Configuration
+##  Configuration
 
 All hyperparameters live in `config.yaml`:
 
@@ -357,13 +273,13 @@ lam:
 
 ---
 
-## 📜 License
+## License
 
 This project is licensed under the **GNU General Public License v3.0** — see the [LICENSE](LICENSE) file for details.
 
 ---
 
-## 🙏 Acknowledgments
+##  Acknowledgments
 
 Built with ❤️ as a learning project to understand transformers, language models, and agentic AI from first principles.
 

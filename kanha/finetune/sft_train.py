@@ -25,6 +25,7 @@ Run:
 
 import os
 import json
+import math
 import torch
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
@@ -170,13 +171,12 @@ def sft_train(args):
         if step < warmup_steps:
             return step / max(warmup_steps, 1)
         progress = (step - warmup_steps) / max(total_steps - warmup_steps, 1)
-        return 0.1 + 0.9 * (1 + __import__("math").cos(3.14159 * progress)) / 2
+        return 0.1 + 0.9 * (1 + math.cos(math.pi * progress)) / 2
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     # ── Training ──
     ensure_dir(args.output)
-    global_step = 0
     best_loss = float("inf")
 
     log.info(f"SFT Training | epochs={args.epochs} | lr={args.lr} | "
@@ -204,7 +204,6 @@ def sft_train(args):
 
             epoch_loss += loss.item()
             n_batches += 1
-            global_step += 1
 
             pbar.set_postfix({
                 "loss": f"{loss.item():.4f}",

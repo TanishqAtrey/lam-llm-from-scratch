@@ -220,8 +220,12 @@ def dpo_train(args):
     # Tokenizer
     tokenizer = KanhaTokenizer()
 
-    # Dataset
-    dataset = DPODataset(args.data, tokenizer, max_len=cfg.model.max_seq_len)
+    # Dataset — use LAMDPODataset for lam-dpo, regular DPODataset for dpo
+    if getattr(args, "lam_mode", False):
+        from kanha.lam.trajectory import LAMDPODataset
+        dataset = LAMDPODataset(args.data, tokenizer, max_len=cfg.model.max_seq_len)
+    else:
+        dataset = DPODataset(args.data, tokenizer, max_len=cfg.model.max_seq_len)
     dataloader = DataLoader(
         dataset, batch_size=args.batch_size, shuffle=True, drop_last=True, num_workers=0
     )
@@ -238,7 +242,6 @@ def dpo_train(args):
     beta = getattr(args, "beta", 0.1)
 
     ensure_dir(args.output)
-    global_step = 0
 
     log.info(f"DPO Training | epochs={args.epochs} | lr={args.lr} | beta={beta}")
 
@@ -279,7 +282,6 @@ def dpo_train(args):
 
             epoch_loss += loss.item()
             n_batches += 1
-            global_step += 1
 
             pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 

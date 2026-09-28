@@ -137,6 +137,7 @@ def main():
 
     elif args.command == "lam-dpo":
         from kanha.finetune.dpo_train import dpo_train
+        args.lam_mode = True
         dpo_train(args)
 
     elif args.command == "agent":

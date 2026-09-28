@@ -27,11 +27,7 @@ from tqdm import tqdm
 
 from kanha.core.model import KanhaModel
 from kanha.core.tokenizer import KanhaTokenizer
-from kanha.prompting.builder import (
-    LAM_ACTION_MARKER,
-    build_lam_step_prompt,
-    build_lam_training_pair,
-)
+from kanha.prompting.builder import build_lam_step_prompt
 from kanha.utils.config import cfg
 from kanha.utils.helpers import get_device, ensure_dir
 from kanha.utils.logging import get_logger
@@ -177,7 +173,6 @@ def lam_sft_train(args):
 
     # ── Training ──
     ensure_dir(args.output)
-    global_step = 0
     best_loss = float("inf")
 
     log.info(
@@ -207,7 +202,6 @@ def lam_sft_train(args):
 
             epoch_loss += loss.item()
             n_batches += 1
-            global_step += 1
 
             pbar.set_postfix({
                 "loss": f"{loss.item():.4f}",

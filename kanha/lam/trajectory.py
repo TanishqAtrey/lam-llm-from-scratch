@@ -26,75 +26,6 @@ def format_step_prompt(goal: str, history: list[dict], include_trailing_action_m
         parts.append(ACTION_MARKER)
     return "".join(parts)
 
-def expand_to_steps(trajectory: dict) -> list[dict]:
-    steps = trajectory.get('steps', [])
-    goal = trajectory.get('goal', '')
-    
-    expanded = []
-    for i in range(len(steps)):
-        prompt = format_step_prompt(goal, steps[:i])
-        response = steps[i]['action'] + '\n'
-        expanded.append({
-            'prompt': prompt,
-            'response': response
-        })
-    return expanded
-
-class LAMDataset(Dataset):
-    def __init__(self, data_path: str, tokenizer: KanhaTokenizer, max_len: int = 512):
-        self.tokenizer = tokenizer
-        self.max_len = max_len
-        self.examples = []
-        
-        with open(data_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                if not line.strip(): continue
-                traj = json.loads(line)
-                self.examples.extend(expand_to_steps(traj))
-                
-        logger.info(f"Loaded {len(self.examples)} examples from {data_path}")
-
-    def __len__(self):
-        return len(self.examples)
-
-    def __getitem__(self, idx):
-        ex = self.examples[idx]
-        prompt = ex['prompt']
-        response = ex['response']
-        
-        full_text = prompt + response
-        
-        # Tokenize the prompt alone to find length for masking
-        prompt_tokens = self.tokenizer.encode(prompt, add_bos=True, add_eos=False)
-        mask_len = len(prompt_tokens)
-        
-        # Tokenize full text
-        full_ids = self.tokenizer.encode(
-            full_text, add_bos=True, add_eos=True, max_length=self.max_len
-        )
-        
-        # Standard shifted input/target pairs (same as SFTDataset)
-        input_ids = full_ids[:-1]
-        labels = full_ids[1:]
-        
-        # Mask prompt tokens in labels (set to -100)
-        for i in range(min(mask_len - 1, len(labels))):
-            labels[i] = -100
-            
-        # Pad/truncate to max_len - 1
-        seq_len = self.max_len - 1
-        pad_len = seq_len - len(input_ids)
-        if pad_len > 0:
-            input_ids = input_ids + [self.tokenizer.PAD_ID] * pad_len
-            labels = labels + [-100] * pad_len
-        else:
-            input_ids = input_ids[:seq_len]
-            labels = labels[:seq_len]
-            
-        return {
-            'input_ids': torch.tensor(input_ids, dtype=torch.long),
-            'labels': torch.tensor(labels, dtype=torch.long)
-        }
 
 
 class LAMDPODataset(Dataset):
@@ -148,8 +79,8 @@ class LAMDPODataset(Dataset):
     def __getitem__(self, idx):
         ex = self.examples[idx]
         prompt = ex['prompt']
-        chosen = ex['chosen'] + '\n'
-        rejected = ex['rejected'] + '\n'
+        chosen = ex['chosen']
+        rejected = ex['rejected']
         
         c_tokens, c_labels = self._process_one(prompt, chosen)
         r_tokens, r_labels = self._process_one(prompt, rejected)

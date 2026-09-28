@@ -205,12 +205,13 @@ class TaskStore:
         self.save()
 
     def save(self):
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        parent_dir = os.path.dirname(os.path.abspath(self.path))
+        os.makedirs(parent_dir, exist_ok=True)
         data = {
             'next_id': self._next_id,
             'tasks': {str(k): asdict(v) for k, v in self._tasks.items()}
         }
-        fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(self.path))
+        fd, temp_path = tempfile.mkstemp(dir=parent_dir)
         with os.fdopen(fd, 'w') as f:
             json.dump(data, f, indent=2)
         os.replace(temp_path, self.path)

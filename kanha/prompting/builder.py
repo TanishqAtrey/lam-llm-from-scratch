@@ -126,38 +126,19 @@ class PromptBuilder:
 
 
 # ── LAM (Language Action Model) prompt helpers ────────────────────────────────
-# These live outside the class so trajectory.py and agent.py can import them
-# without instantiating a PromptBuilder.
+# Re-exported from trajectory.py so that existing imports keep working.
+# The canonical implementation lives in kanha.lam.trajectory to avoid
+# circular imports and to keep a SINGLE source of truth for the template.
 
-LAM_GOAL_MARKER = "### Goal\n"
-LAM_ACTION_MARKER = "### Action\n"
-LAM_OBSERVATION_MARKER = "### Observation\n"
-
-
-def build_lam_step_prompt(goal: str, history: List[dict]) -> str:
-    """Builds the prompt for generating the next action step.
-
-    Args:
-        goal    : the user's natural language request
-        history : [{"action": "...", "observation": "..."}, ...]
-
-    Returns:
-        A string ending with '### Action\\n' so the model generates only
-        the next action text.
-    """
-    parts = [LAM_GOAL_MARKER, goal, "\n"]
-    for step in history:
-        parts.append(LAM_ACTION_MARKER)
-        parts.append(step["action"])
-        parts.append("\n")
-        parts.append(LAM_OBSERVATION_MARKER)
-        parts.append(step["observation"])
-        parts.append("\n")
-    parts.append(LAM_ACTION_MARKER)
-    return "".join(parts)
+from kanha.lam.trajectory import (
+    GOAL_MARKER as LAM_GOAL_MARKER,
+    ACTION_MARKER as LAM_ACTION_MARKER,
+    OBSERVATION_MARKER as LAM_OBSERVATION_MARKER,
+    format_step_prompt as build_lam_step_prompt,
+)
 
 
-def build_lam_training_pair(goal: str, history: List[dict], next_action: str) -> str:
+def build_lam_training_pair(goal: str, history: list, next_action: str) -> str:
     """Builds a complete training example: prompt + the next action as the response.
 
     The boundary between prompt (masked) and response (trained) is the
@@ -165,3 +146,4 @@ def build_lam_training_pair(goal: str, history: List[dict], next_action: str) ->
     """
     prompt = build_lam_step_prompt(goal, history)
     return prompt + next_action
+

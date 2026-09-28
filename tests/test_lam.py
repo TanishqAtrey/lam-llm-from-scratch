@@ -35,7 +35,6 @@ from kanha.lam.environment import TaskEnvironment
 from kanha.lam.trajectory import (
     format_trajectory,
     format_step_prompt,
-    expand_to_steps,
     GOAL_MARKER,
     ACTION_MARKER,
     OBSERVATION_MARKER,
@@ -604,26 +603,6 @@ class TestTrajectory:
         result = format_step_prompt("add a task", [])
         assert result == "### Goal\nadd a task\n### Action\n"
 
-    def test_expand_to_steps(self):
-        traj = {
-            "goal": "add milk and bread",
-            "steps": [
-                {"action": 'add(title="milk")', "observation": "Added: #1 milk"},
-                {"action": 'add(title="bread")', "observation": "Added: #2 bread"},
-                {"action": 'finish(msg="ok")', "observation": "ok"},
-            ],
-        }
-        expanded = expand_to_steps(traj)
-        assert len(expanded) == 3
-
-        # First example has no history
-        assert expanded[0]["prompt"].endswith("### Action\n")
-        assert expanded[0]["response"] == 'add(title="milk")\n'
-
-        # Second example has one history step
-        assert 'add(title="milk")' in expanded[1]["prompt"]
-        assert expanded[1]["response"] == 'add(title="bread")\n'
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Prompt Builder LAM Extension Tests
@@ -791,21 +770,7 @@ class TestIntegration:
         assert "### Goal\nadd milk for today\n" in full
         assert "### Action\n" in full
 
-        # Expand to steps
-        traj_dict = {
-            "goal": "add milk for today",
-            "steps": traj,
-        }
-        expanded = expand_to_steps(traj_dict)
-        assert len(expanded) == 2
 
-        # First step has no history
-        prompt0 = expanded[0]["prompt"]
-        assert prompt0.count("### Action\n") == 1  # just the trailing marker
-
-        # Second step has one history item
-        prompt1 = expanded[1]["prompt"]
-        assert prompt1.count("### Action\n") == 2  # history + trailing
 
     def test_environment_with_oracle(self, tmp_path):
         """Verify that the oracle produces valid trajectories end-to-end."""

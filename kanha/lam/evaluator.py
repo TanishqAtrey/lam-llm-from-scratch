@@ -100,7 +100,7 @@ class LAMEvaluator:
             expected_reply = case.get('expected_reply', None)
             tier = case.get('tier', 'unknown')
             split = case.get('split', 'unknown')
-            opt_steps = case.get('optimal_steps', 1)
+            opt_steps = case.get('optimal_steps', len(case.get('steps', [1])))
             
             # Reset environment to initial world state
             env.reset(initial_tasks=world)

@@ -100,8 +100,8 @@ def validate_action(name: str, args: dict) -> tuple[bool, str]:
     if 'prio' in args and args['prio'] not in {'low', 'med', 'high'}:
         return False, "Argument 'prio' must be one of: low, med, high"
         
-    if 'field' in args and args['field'] not in {'title', 'due', 'priority', 'tag'}:
-        return False, "Argument 'field' must be one of: title, due, priority, tag"
+    if 'field' in args and args['field'] not in {'title', 'due', 'priority', 'tag', 'prio'}:
+        return False, "Argument 'field' must be one of: title, due, priority, tag, prio"
         
     if 'status' in args and args['status'] not in {'todo', 'done'}:
         return False, "Argument 'status' must be one of: todo, done"

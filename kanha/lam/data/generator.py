@@ -105,7 +105,8 @@ class TrajectoryGenerator:
                         'world': world_tasks,
                         'steps': steps,
                         'tier': info['tier'],
-                        'template_id': f"{tier}_{info.get('solver', 'unknown')}_{i}"
+                        'template_id': f"{tier}_{info.get('solver', 'unknown')}_{i}",
+                        'expected_state': env.get_state()
                     }
                     
                     f.write(json.dumps(traj) + '\n')
@@ -147,9 +148,10 @@ def split_data(input_path, train_path, val_path, test_path, val_ratio=0.1, test_
             else:
                 train.append(t)
                 
-    for path, data in [(train_path, train), (val_path, val), (test_path, test)]:
+    for split_name, path, data in [('train', train_path, train), ('val', val_path, val), ('test', test_path, test)]:
         with open(path, 'w', encoding='utf-8') as f:
             for d in data:
+                d['split'] = split_name
                 f.write(json.dumps(d) + '\n')
                 
     return {

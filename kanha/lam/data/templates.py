@@ -120,7 +120,7 @@ TEMPLATES = {
     'tier6': [
         {'goal': 'mark task 99 as done', 'tier': 6, 'solver': '_solve_error_recovery', 'slots': {}, 'requires_existing': False, 'min_world_size': 0},
         {'goal': 'delete the {query} task', 'tier': 6, 'solver': '_solve_error_recovery', 'slots': {'query': ['nonexistent_task_12345']}, 'requires_existing': False, 'min_world_size': 0},
-        {'goal': 'complete {query}', 'tier': 6, 'solver': '_solve_error_recovery', 'slots': {'query': TITLE_POOL}, 'requires_existing': True, 'min_world_size': 1},
+        {'goal': 'complete {query}', 'tier': 6, 'solver': '_solve_error_recovery', 'slots': {'query': ['missing_task_complete']}, 'requires_existing': False, 'min_world_size': 0},
         {'goal': 'edit task 999...', 'tier': 6, 'solver': '_solve_error_recovery', 'slots': {}, 'requires_existing': False, 'min_world_size': 0},
         {'goal': 'move {query} to friday', 'tier': 6, 'solver': '_solve_error_recovery', 'slots': {'query': ['never_find_this_one']}, 'requires_existing': False, 'min_world_size': 0},
         {'goal': 'change priority of 88 to high', 'tier': 6, 'solver': '_solve_error_recovery', 'slots': {}, 'requires_existing': False, 'min_world_size': 0},

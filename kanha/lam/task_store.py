@@ -90,9 +90,12 @@ class TaskStore:
         if task.status == 'deleted':
             raise ValueError(f"Task {task_id} is deleted")
         
-        valid_fields = {'title', 'due', 'priority', 'tag'}
+        valid_fields = {'title', 'due', 'priority', 'tag', 'prio'}
         if field not in valid_fields:
             raise ValueError(f"Invalid field: {field}")
+            
+        if field == 'prio':
+            field = 'priority'
             
         old_value = getattr(task, field)
         setattr(task, field, value)

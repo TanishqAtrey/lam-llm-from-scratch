@@ -94,7 +94,7 @@ def test_base_model(model_path, tokenizer_path=None):
   IF outputs have no spaces / pure repetition / garbage:
     → Base model needs MORE pretraining. Options:
       a) Train for more steps (increase max_steps in config.yaml)
-      b) Check your tokenizer (run: python scripts/test_tokenizer.py)
+      b) Check your tokenizer (run: python scripts/train_tokenizer.py)
       c) Lower learning rate or increase warmup_steps
 
   IF outputs are mostly symbols/numbers:

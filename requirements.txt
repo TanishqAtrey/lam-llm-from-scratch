@@ -1,0 +1,30 @@
+# ── Core (required for training + inference) ──────────────────────────────
+torch>=2.2.0
+numpy>=1.24.0
+sentencepiece>=0.1.99
+pyyaml>=6.0
+tqdm>=4.66.0
+rich>=13.7.0
+
+# ── Data download / preprocessing ──────────────────────────────────────────
+datasets>=2.16.0
+
+# ── RAG (retrieval-augmented generation) ───────────────────────────────────
+sentence-transformers>=2.3.0
+faiss-cpu>=1.7.4
+
+# ── Tools ───────────────────────────────────────────────────────────────────
+duckduckgo-search>=4.4
+
+# ── API server ──────────────────────────────────────────────────────────────
+fastapi>=0.109.0
+uvicorn>=0.27.0
+pydantic>=2.5.0
+
+# ── LAM Agent (LangChain / LangGraph) ──────────────────────────────────────
+langchain>=0.3.0
+langchain-core>=0.3.0
+langgraph>=0.2.0
+
+# ── Testing ─────────────────────────────────────────────────────────────────
+pytest>=8.0.0

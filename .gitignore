@@ -1,0 +1,32 @@
+# ── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+
+# ── Model weights & checkpoints (large binaries — don't commit) ─────────────
+models/
+*.pt
+*.bin
+*.model
+!requirements.txt
+
+# ── Data (large / regeneratable — don't commit) ──────────────────────────────
+data/raw/
+data/processed/
+data/embeddings/
+*.npy
+*.jsonl
+
+# ── Logs / misc ───────────────────────────────────────────────────────────────
+*.log
+.DS_Store
+.ipynb_checkpoints/
+.pytest_cache/
+
+# ── IDE ─────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/

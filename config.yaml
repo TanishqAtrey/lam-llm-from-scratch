@@ -1,0 +1,75 @@
+model:
+  vocab_size: 16000       # right-sized for 60M model (32k wastes embedding params)
+  dim: 512
+  n_layers: 8
+  n_heads: 8
+  ff_dim: 2048
+  max_seq_len: 512        # 512 saves ~2x memory vs 1024 on Apple Silicon
+  dropout: 0.1
+
+training:
+  batch_size: 8           # safe for 8-16GB Apple Silicon
+  grad_accum_steps: 4     # simulates effective batch of 32 (8 × 4)
+  learning_rate: 0.0003
+  weight_decay: 0.01
+  warmup_steps: 500
+  max_steps: 50000        # ~6-10h on M1/M2; increase on M3/M4
+  grad_clip: 1.0
+  save_every: 2000
+  log_every: 50
+
+tokenizer:
+  vocab_size: 16000
+  model_type: bpe
+  pad_token: "<pad>"
+  unk_token: "<unk>"
+  bos_token: "<s>"
+  eos_token: "</s>"
+
+rag:
+  top_k: 5
+  chunk_size: 512
+  chunk_overlap: 64
+  embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
+  index_path: "data/embeddings/faiss.index"
+
+memory:
+  short_term_limit: 20
+  long_term_top_k: 3
+
+inference:
+  max_new_tokens: 512
+  temperature: 0.7
+  top_p: 0.9
+  top_k: 50
+  repetition_penalty: 1.1
+
+paths:
+  base_model: "models/base/"
+  finetuned_model: "models/finetuned/"
+  lam_model: "models/lam/"
+  tokenizer_model: "models/tokenizer/tokenizer.model"
+  raw_data: "data/raw/"
+  processed_data: "data/processed/"
+
+lam:
+  max_steps_per_trajectory: 8
+  max_retries_on_invalid: 3
+  task_store_path: "data/lam/tasks.json"
+  trajectory_data: "data/lam/trajectories.jsonl"
+  dpo_data: "data/lam/dpo.jsonl"
+  reference_date: "2025-01-15"
+  tier_weights:
+    tier1: 0.20
+    tier2: 0.15
+    tier3: 0.20
+    tier4: 0.10
+    tier5: 0.10
+    tier6: 0.10
+    tier7: 0.10
+    tier8: 0.05
+  generation:
+    temperature: 0.0
+    max_new_tokens: 64
+    top_k: 1
+    top_p: 1.0

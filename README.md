@@ -279,3 +279,10 @@ This project is licensed under the **GNU General Public License v3.0** — see t
 
 ---
 
+##  Acknowledgments
+
+Built with ❤️ as a learning project to understand transformers, language models, and agentic AI from first principles.
+
+- Architecture inspired by LLaMA / GPT-2
+- LAM concept inspired by the [LAM paper](https://arxiv.org/abs/2403.02798) from Rabbit Inc.
+- Agent orchestration powered by [LangGraph](https://github.com/langchain-ai/langgraph)

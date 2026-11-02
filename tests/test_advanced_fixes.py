@@ -409,3 +409,23 @@ def test_rope_offset_advancement_across_rolling_kv():
     assert max(captured_offsets) >= 27, f"Max offset was {max(captured_offsets)}, should reach 27"
 
 
+def test_eval_every_default_fallback():
+    """Verify that eval_every resolves to an integer when args.eval_every is None."""
+    import argparse
+    from kanha.utils.config import cfg
+
+    tc = cfg.training
+    # Simulating argparse with default=None as in main.py train parser
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--eval_every", type=int, default=None)
+    args = parser.parse_args([])
+
+    eval_every = getattr(args, "eval_every", None) or getattr(tc, "eval_every", None) or getattr(tc, "save_every", 5000)
+    assert isinstance(eval_every, int)
+    assert eval_every > 0
+    # Also verify arithmetic operation with step works without TypeError
+    step = 100
+    assert (step % eval_every) in range(eval_every)
+
+
+

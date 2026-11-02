@@ -136,7 +136,7 @@ def train(args):
     if val_fraction is None:
         val_fraction = getattr(tc, "val_fraction", 0.1)
     patience = getattr(args, "patience", None) or getattr(tc, "patience", 5)
-    eval_every = getattr(args, "eval_every", tc.save_every)
+    eval_every = getattr(args, "eval_every", None) or getattr(tc, "eval_every", None) or getattr(tc, "save_every", 5000)
 
     # ── Datasets (train / val split) ──
     train_dataset = TokenDataset(args.data, seq_len=mc.max_seq_len,
@@ -281,7 +281,7 @@ def train(args):
             _save_pretrain_checkpoint(ckpt_path, model, optimizer, scheduler, step, best_val_loss)
 
         # ── Validation + Early stopping ──
-        if val_dataset is not None and step % eval_every == 0:
+        if val_dataset is not None and eval_every and step % eval_every == 0:
             val_loss = _evaluate_val_loss(
                 model, val_dataset, device, tc.batch_size
             )

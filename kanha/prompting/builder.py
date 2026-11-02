@@ -55,7 +55,7 @@ class PromptBuilder:
         # Returns: "### Instruction:\\nWhat is Python?\\n\\n### Response:\\n"
     """
 
-    def __init__(self, include_rules: bool = True):
+    def __init__(self, include_rules: bool = False):
         self.include_rules = include_rules
 
     def build(
@@ -64,7 +64,7 @@ class PromptBuilder:
         memory_context: str = "",
         retrieved_chunks: Optional[List[str]] = None,
         tool_descriptions: str = "",
-        max_context_chars: int = 2000,
+        max_context_chars: int = None,
     ) -> str:
         """
         Builds the full prompt string for the model.
@@ -95,6 +95,14 @@ class PromptBuilder:
 
         # RAG context
         if retrieved_chunks:
+            # Scale max context to ~4 tokens/char × max_seq_len, leave room for response
+            if max_context_chars is None:
+                try:
+                    from kanha.utils.config import cfg
+                    # Use ~40% of max_seq_len for context (at ~4 chars/token)
+                    max_context_chars = int(cfg.model.max_seq_len * 0.4 * 4)
+                except Exception:
+                    max_context_chars = 2000
             context = self._truncate_context(retrieved_chunks, max_context_chars)
             parts.append(RAG_TEMPLATE.format(
                 context=context,
@@ -115,14 +123,22 @@ class PromptBuilder:
     @staticmethod
     def _truncate_context(chunks: List[str], max_chars: int) -> str:
         """Concatenates chunks up to max_chars limit."""
+        if not chunks or max_chars <= 0:
+            return ""
         result = []
         total = 0
+        sep = "\n---\n"
         for chunk in chunks:
-            if total + len(chunk) > max_chars:
+            needed = (len(sep) if result else 0) + len(chunk)
+            if total + needed <= max_chars:
+                result.append(chunk)
+                total += needed
+            else:
+                remaining = max_chars - total - (len(sep) if result else 0)
+                if remaining > 0:
+                    result.append(chunk[:remaining])
                 break
-            result.append(chunk)
-            total += len(chunk)
-        return "\n---\n".join(result)
+        return sep.join(result)
 
 
 # ── LAM (Language Action Model) prompt helpers ────────────────────────────────

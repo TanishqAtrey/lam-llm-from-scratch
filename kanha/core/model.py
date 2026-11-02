@@ -61,12 +61,15 @@ class KanhaModel(nn.Module):
         log.info(f"KanhaModel | params: {count_parameters(self):,}")
 
     def _init_weights(self, module):
+        # GPT-2 / LLaMA-style init: std = 1/sqrt(dim) for better gradient flow
+        # at scale. For dim=512, std ≈ 0.044; for dim=768, std ≈ 0.036.
+        std = 1.0 / (self.dim ** 0.5)
         if isinstance(module, nn.Linear):
-            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            nn.init.normal_(module.weight, mean=0.0, std=std)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
-            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            nn.init.normal_(module.weight, mean=0.0, std=std)
 
     def forward(
         self,
@@ -101,18 +104,21 @@ class KanhaModel(nn.Module):
 
         loss = None
         if targets is not None:
-            loss = nn.functional.cross_entropy(
-                logits.view(-1, self.vocab_size),
-                targets.view(-1),
-                ignore_index=-100,
-            )
+            if (targets != -100).any():
+                loss = nn.functional.cross_entropy(
+                    logits.view(-1, self.vocab_size),
+                    targets.view(-1),
+                    ignore_index=-100,
+                )
+            else:
+                loss = torch.tensor(0.0, device=logits.device, requires_grad=True)
 
         return logits, loss, new_caches
 
     @classmethod
     def from_pretrained(cls, path: str) -> "KanhaModel":
         device     = get_device()
-        checkpoint = torch.load(path, map_location=device)
+        checkpoint = torch.load(path, map_location=device, weights_only=False)
         model      = cls(**checkpoint.get("model_config", {}))
         model.load_state_dict(checkpoint["model_state"])
         model.to(device).eval()

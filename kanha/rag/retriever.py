@@ -23,7 +23,7 @@ class SentenceEmbedder:
     def __init__(self, model_name: str = None):
         self.model_name = model_name or cfg.rag.embedding_model
         self.model = None
-        self.dim = 384  # default for all-MiniLM-L6-v2
+        self.dim = None  # determined dynamically after loading
 
         try:
             from sentence_transformers import SentenceTransformer
@@ -32,6 +32,8 @@ class SentenceEmbedder:
             log.info(f"Embedder loaded: {self.model_name} (dim={self.dim})")
         except ImportError:
             log.warning("sentence-transformers not installed. Run: pip install sentence-transformers")
+            # Fallback dim for all-MiniLM-L6-v2 — only used if model can't load
+            self.dim = 384
 
     def embed(self, texts: List[str], batch_size: int = 32) -> np.ndarray:
         """Embeds a list of texts. Returns (N, dim) float32 array."""

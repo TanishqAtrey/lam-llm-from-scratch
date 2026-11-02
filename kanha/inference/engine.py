@@ -167,6 +167,7 @@ class InferenceEngine:
                 temperature=cfg.inference.temperature,
                 top_k=cfg.inference.top_k,
                 top_p=cfg.inference.top_p,
+                repetition_penalty=cfg.inference.repetition_penalty,
                 device=self.device,
             ):
                 print(token_text, end="", flush=True)

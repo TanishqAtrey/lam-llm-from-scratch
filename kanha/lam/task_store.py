@@ -1,4 +1,8 @@
 from __future__ import annotations
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 import json
 import os
 import tempfile
@@ -28,12 +32,26 @@ class Task:
     status: str = 'todo'
 
 class TaskStore:
-    def __init__(self, path='data/lam/tasks.json', reference_date=None):
+    # Maximum number of undo operations to keep (configurable, no hardcoded magic number)
+    MAX_UNDO_DEPTH = 10
+
+    def __init__(self, path='data/lam/tasks.json', reference_date=None, list_limit=None):
         self.path = path
         self.reference_date = reference_date if reference_date else datetime.date.today()
         self._next_id = 1
         self._tasks: dict[int, Task] = {}
         self._undo_stack: list[tuple[str, dict]] = []
+
+        # Display limit for list()/find() — read from config if available, else default 6
+        if list_limit is not None:
+            self._list_limit = list_limit
+        else:
+            try:
+                from kanha.utils.config import cfg
+                self._list_limit = getattr(cfg.lam, 'list_display_limit', 6)
+            except Exception:
+                self._list_limit = 6
+
         self.load()
 
     def add(self, title: str, due: Optional[str] = None, prio: str = 'med', tag: Optional[str] = None) -> Task:
@@ -52,15 +70,22 @@ class TaskStore:
             if task.status != 'todo':
                 return False
         
-        if due is not None and (task.due is None or task.due.lower() != due.lower()):
-            return False
+        if due is not None:
+            if task.due is None:
+                return False
+            resolved_query = self.resolve_date(due).lower()
+            resolved_task = self.resolve_date(task.due).lower()
+            if task.due.lower() != due.lower() and resolved_task != resolved_query:
+                return False
         if prio is not None and task.priority.lower() != prio.lower():
             return False
         if tag is not None and (task.tag is None or task.tag.lower() != tag.lower()):
             return False
         return True
 
-    def list(self, due=None, prio=None, tag=None, status=None, limit=6) -> tuple[list[Task], int]:
+    def list(self, due=None, prio=None, tag=None, status=None, limit=None) -> tuple[list[Task], int]:
+        if limit is None:
+            limit = self._list_limit
         matches = []
         for task in self._tasks.values():
             if task.status != 'deleted' and self._matches(task, due, prio, tag, status):
@@ -74,7 +99,7 @@ class TaskStore:
         for task in self._tasks.values():
             if task.status != 'deleted' and query_lower in task.title.lower():
                 matches.append(task)
-        return matches[:6]
+        return matches[:self._list_limit]
 
     def count(self, due=None, prio=None, tag=None, status=None) -> int:
         c = 0
@@ -156,7 +181,10 @@ class TaskStore:
         return len(deleted_ids)
 
     def _push_undo(self, operation: str, data: dict):
-        self._undo_stack = [(operation, data)]
+        self._undo_stack.append((operation, data))
+        # Cap undo history to prevent unbounded memory growth
+        if len(self._undo_stack) > self.MAX_UNDO_DEPTH:
+            self._undo_stack = self._undo_stack[-self.MAX_UNDO_DEPTH:]
 
     def undo(self) -> str:
         if not self._undo_stack:
@@ -214,19 +242,82 @@ class TaskStore:
             'next_id': self._next_id,
             'tasks': {str(k): asdict(v) for k, v in self._tasks.items()}
         }
-        fd, temp_path = tempfile.mkstemp(dir=parent_dir)
-        with os.fdopen(fd, 'w') as f:
-            json.dump(data, f, indent=2)
-        os.replace(temp_path, self.path)
+        # File-based locking for multi-worker safety (uvicorn --workers > 1)
+        lock_path = self.path + '.lock'
+        if fcntl is not None:
+            with open(lock_path, 'a') as lock_f:
+                fcntl.flock(lock_f, fcntl.LOCK_EX)
+                fd, temp_path = tempfile.mkstemp(dir=parent_dir)
+                with os.fdopen(fd, 'w') as f:
+                    json.dump(data, f, indent=2)
+                os.replace(temp_path, self.path)
+        else:
+            fd, temp_path = tempfile.mkstemp(dir=parent_dir)
+            with os.fdopen(fd, 'w') as f:
+                json.dump(data, f, indent=2)
+            os.replace(temp_path, self.path)
 
     def load(self):
         if os.path.exists(self.path):
-            with open(self.path, 'r') as f:
-                data = json.load(f)
-                self._next_id = data.get('next_id', 1)
-                self._tasks = {
-                    int(k): Task(**v) for k, v in data.get('tasks', {}).items()
-                }
+            if fcntl is not None:
+                lock_path = self.path + '.lock'
+                with open(lock_path, 'a') as lock_f:
+                    fcntl.flock(lock_f, fcntl.LOCK_SH)
+                    with open(self.path, 'r') as f:
+                        data = json.load(f)
+            else:
+                with open(self.path, 'r') as f:
+                    data = json.load(f)
+            self._next_id = data.get('next_id', 1)
+            self._tasks = {
+                int(k): Task(**v) for k, v in data.get('tasks', {}).items()
+            }
+
+    @staticmethod
+    def resolve_symbolic_date(symbolic: str, reference_date=None) -> str:
+        """Resolves symbolic date strings (today, tomorrow, monday, etc.)
+        to ISO format dates relative to reference_date."""
+        if not symbolic:
+            return symbolic
+        symbolic_lower = str(symbolic).lower().strip()
+
+        if reference_date is None:
+            ref = datetime.date.today()
+        elif isinstance(reference_date, str):
+            try:
+                ref = datetime.date.fromisoformat(reference_date)
+            except ValueError:
+                return symbolic
+        else:
+            ref = reference_date
+
+        day_map = {
+            'monday': 0, 'tuesday': 1, 'wednesday': 2,
+            'thursday': 3, 'friday': 4, 'saturday': 5, 'sunday': 6,
+        }
+
+        if symbolic_lower == 'today':
+            return ref.isoformat()
+        elif symbolic_lower == 'tomorrow':
+            return (ref + datetime.timedelta(days=1)).isoformat()
+        elif symbolic_lower == 'next week':
+            # Next Monday
+            days_until_monday = (7 - ref.weekday()) % 7
+            if days_until_monday == 0:
+                days_until_monday = 7
+            return (ref + datetime.timedelta(days=days_until_monday)).isoformat()
+        elif symbolic_lower in day_map:
+            target = day_map[symbolic_lower]
+            current = ref.weekday()
+            days_ahead = (target - current) % 7
+            if days_ahead == 0:
+                days_ahead = 7  # next occurrence, not today
+            return (ref + datetime.timedelta(days=days_ahead)).isoformat()
+        else:
+            # Return as-is if not a recognized symbolic date
+            return symbolic
 
     def resolve_date(self, symbolic: str) -> str:
-        return symbolic
+        """Resolves symbolic date strings (today, tomorrow, monday, etc.)
+        to ISO format dates relative to reference_date."""
+        return self.resolve_symbolic_date(symbolic, self.reference_date)

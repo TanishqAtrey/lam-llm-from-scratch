@@ -15,7 +15,10 @@ from langchain_core.callbacks.manager import CallbackManagerForLLMRun
 from langchain_core.language_models.llms import BaseLLM
 from pydantic import Field, PrivateAttr
 
-from kanha.core.generation import generate as kanha_generate
+from kanha.core.generation import (
+    generate as kanha_generate,
+    generate_with_confidence as kanha_generate_with_confidence,
+)
 
 
 class KanhaLLM(BaseLLM):
@@ -131,6 +134,22 @@ class KanhaLLM(BaseLLM):
         """
         raw = self._call(prompt, temperature=temperature)
         return self._clean_action(raw)
+
+    def generate_action_with_confidence(
+        self, prompt: str, temperature: float = 0.0
+    ) -> tuple[str, float]:
+        """Generate a cleaned action string and its mean token-level confidence score."""
+        raw, confidence, _ = kanha_generate_with_confidence(
+            self._model,
+            self._tokenizer,
+            prompt,
+            max_new_tokens=self.max_new_tokens,
+            temperature=temperature,
+            top_k=self.top_k,
+            top_p=self.top_p,
+            repetition_penalty=self.repetition_penalty,
+        )
+        return self._clean_action(raw), confidence
 
     @staticmethod
     def _clean_action(raw: str) -> str:

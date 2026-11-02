@@ -56,7 +56,8 @@ def preprocess(args):
 
     def flush(f_bin, buf):
         if buf:
-            np.array(buf, dtype=np.int32).tofile(f_bin)
+            # uint16 is loss-free for 16k vocab (<65535) and saves 50% disk space (6GB vs 12GB)
+            np.array(buf, dtype=np.uint16).tofile(f_bin)
         return []
 
     with open(tmp_path, "wb") as f_bin:
@@ -88,10 +89,31 @@ def preprocess(args):
 
         flush(f_bin, buffer)
 
-    # Convert .bin → .npy
-    log.info("Converting to .npy...")
-    data = np.fromfile(tmp_path, dtype=np.int32)
-    np.save(str(out_path), data)
+    if total_tokens == 0:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise RuntimeError("No tokens were generated. Check dataset/text inputs.")
+
+    # Convert .bin → .npy via chunked memmap (keeps RAM < 100MB, prevents OOM on large files)
+    log.info("Converting to memory-mapped .npy...")
+    mmap = np.lib.format.open_memmap(
+        str(out_path), mode="w+", dtype=np.uint16, shape=(total_tokens,)
+    )
+    CHUNK_TOKENS = 32 * 1024 * 1024  # 32M tokens = 64MB buffer
+    cursor = 0
+    with open(tmp_path, "rb") as f_in:
+        pbar_conv = tqdm(total=total_tokens, desc="  Writing .npy", unit="tok")
+        while cursor < total_tokens:
+            n = min(CHUNK_TOKENS, total_tokens - cursor)
+            chunk = np.fromfile(f_in, dtype=np.uint16, count=n)
+            if len(chunk) == 0:
+                break
+            mmap[cursor:cursor + len(chunk)] = chunk
+            cursor += len(chunk)
+            pbar_conv.update(len(chunk))
+        pbar_conv.close()
+    mmap.flush()
+    del mmap
     tmp_path.unlink()
 
     log.info(f"Done!")

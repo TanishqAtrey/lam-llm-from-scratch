@@ -392,6 +392,16 @@ class TestActionParser:
         ok, msg = validate_action("edit", {"id": "1", "field": "color", "value": "x"})
         assert ok is False
 
+    def test_validate_edit_bad_prio(self):
+        ok, msg = validate_action("edit", {"id": "1", "field": "prio", "value": "urgent"})
+        assert ok is False
+        assert "priority" in msg.lower() or "value" in msg.lower()
+
+    def test_validate_edit_good_prio(self):
+        ok, msg = validate_action("edit", {"id": "1", "field": "priority", "value": "high"})
+        assert ok is True
+        assert msg == ""
+
     def test_all_12_actions_in_schema(self):
         expected = {"add", "list", "find", "count", "edit", "done", "done_all",
                     "delete", "delete_done", "undo", "ask", "finish"}

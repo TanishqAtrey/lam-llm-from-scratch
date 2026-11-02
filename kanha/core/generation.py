@@ -175,6 +175,98 @@ def generate(
     return tokenizer.decode(new_ids, skip_special=True)
 
 
+# ─── Generation with confidence scoring ───────────────────────────────────────
+
+@torch.no_grad()
+def generate_with_confidence(
+    model,
+    tokenizer,
+    prompt: str,
+    max_new_tokens: int       = None,
+    temperature: float        = None,
+    top_k: int                = None,
+    top_p: float              = None,
+    repetition_penalty: float = None,
+    stop_tokens: Optional[List[int]] = None,
+    device: torch.device      = None,
+) -> tuple[str, float, list[float]]:
+    """
+    Generates a response and returns (text, mean_confidence, per_token_confidences).
+
+    Confidence = mean of softmax probabilities assigned to each selected token.
+    Values near 1.0 = model is very sure. Values near 0.0 = model is guessing.
+
+    This enables downstream safety decisions:
+      - confidence < 0.3  → ask user for clarification
+      - confidence < 0.5  → flag as low confidence
+      - confidence >= 0.5 → proceed normally
+
+    Returns:
+        text             : str   — the generated continuation (no prompt)
+        mean_confidence  : float — average token-level probability (0 to 1)
+        per_token_confs  : list[float] — per-token softmax probabilities
+    """
+    from kanha.utils.config import cfg
+
+    ic                 = cfg.inference
+    max_new_tokens     = max_new_tokens     or ic.max_new_tokens
+    temperature        = temperature        if temperature        is not None else ic.temperature
+    top_k              = top_k              if top_k              is not None else ic.top_k
+    top_p              = top_p              if top_p              is not None else ic.top_p
+    repetition_penalty = repetition_penalty if repetition_penalty is not None else ic.repetition_penalty
+    device             = device             or get_device()
+
+    if stop_tokens is None:
+        stop_tokens = [tokenizer.EOS_ID]
+
+    model.eval()
+    model.to(device)
+
+    input_ids    = tokenizer.encode(prompt, add_bos=True, add_eos=False)
+    prompt_len   = len(input_ids)
+    input_tensor = torch.tensor([input_ids], dtype=torch.long, device=device)
+
+    generated = list(input_ids)
+    kv_caches = [None] * model.n_layers
+    per_token_confs: list[float] = []
+
+    for _ in range(max_new_tokens):
+        logits, _, kv_caches = model(input_tensor, kv_caches=kv_caches)
+
+        # Repetition penalty over full context
+        if repetition_penalty != 1.0:
+            ctx = torch.tensor([generated], dtype=torch.long, device=device)
+            logits[:, -1, :] = apply_repetition_penalty(
+                logits[:, -1, :], ctx, repetition_penalty,
+            )
+
+        # Compute softmax probabilities for confidence tracking
+        last_logits = logits[:, -1, :]
+        probs = F.softmax(last_logits, dim=-1)
+
+        next_token = sample_next_token(logits, temperature, top_k, top_p)
+        next_id    = next_token.item()
+
+        # Record confidence: the probability assigned to the chosen token
+        token_confidence = probs[0, next_id].item()
+        per_token_confs.append(token_confidence)
+
+        generated.append(next_id)
+
+        if next_id in stop_tokens:
+            break
+
+        input_tensor = next_token
+
+    # Decode only new tokens
+    new_ids = generated[prompt_len:]
+    text = tokenizer.decode(new_ids, skip_special=True)
+
+    mean_confidence = sum(per_token_confs) / max(len(per_token_confs), 1)
+
+    return text, mean_confidence, per_token_confs
+
+
 # ─── Streaming variant ────────────────────────────────────────────────────────
 
 @torch.no_grad()
@@ -182,11 +274,13 @@ def generate_stream(
     model,
     tokenizer,
     prompt: str,
-    max_new_tokens: int  = 256,
-    temperature: float   = 0.7,
-    top_k: int           = 50,
-    top_p: float         = 0.9,
-    device: torch.device = None,
+    max_new_tokens: int       = None,
+    temperature: float        = None,
+    top_k: int                = None,
+    top_p: float              = None,
+    repetition_penalty: float = None,
+    stop_tokens: Optional[List[int]] = None,
+    device: torch.device      = None,
 ):
     """
     Generator that yields one decoded token string at a time.
@@ -203,7 +297,17 @@ def generate_stream(
     """
     from kanha.utils.config import cfg
 
-    device = device or get_device()
+    ic                 = cfg.inference
+    max_new_tokens     = max_new_tokens     if max_new_tokens     is not None else ic.max_new_tokens
+    temperature        = temperature        if temperature        is not None else ic.temperature
+    top_k              = top_k              if top_k              is not None else ic.top_k
+    top_p              = top_p              if top_p              is not None else ic.top_p
+    repetition_penalty = repetition_penalty if repetition_penalty is not None else ic.repetition_penalty
+    device             = device or get_device()
+
+    if stop_tokens is None:
+        stop_tokens = [tokenizer.EOS_ID]
+
     model.eval()
     model.to(device)
 
@@ -216,22 +320,20 @@ def generate_stream(
     new_ids = []
     prev_text = ""
 
-    rep_penalty = cfg.inference.repetition_penalty
-
     for _ in range(max_new_tokens):
         logits, _, kv_caches = model(input_tensor, kv_caches=kv_caches)
 
-        if rep_penalty != 1.0:
+        if repetition_penalty != 1.0:
             ctx = torch.tensor([generated], dtype=torch.long, device=device)
             logits[:, -1, :] = apply_repetition_penalty(
-                logits[:, -1, :], ctx, rep_penalty,
+                logits[:, -1, :], ctx, repetition_penalty,
             )
 
         next_token = sample_next_token(logits, temperature, top_k, top_p)
         next_id    = next_token.item()
         generated.append(next_id)
 
-        if next_id == tokenizer.EOS_ID:
+        if next_id in stop_tokens:
             break
 
         # Incremental decode: decode ALL new tokens, yield only the new part

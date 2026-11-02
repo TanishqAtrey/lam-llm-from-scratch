@@ -23,7 +23,9 @@ ACTION_SCHEMA = {
 
 def parse_action(text: str) -> tuple[str, dict]:
     text = text.strip()
-    match = re.match(r'^([a-zA-Z_]+)\((.*)\)$', text, re.DOTALL)
+    if text.endswith(';'):
+        text = text[:-1].strip()
+    match = re.match(r'^\s*([a-zA-Z_]+)\s*\((.*)\)\s*$', text, re.DOTALL)
     if not match:
         raise ActionParseError("Malformed action format")
     
@@ -64,7 +66,13 @@ def parse_action(text: str) -> tuple[str, dict]:
                     current_val += char
             else:
                 if char == quote_char:
-                    in_quotes = False
+                    # Only close quote if next non-space char is comma, ')', or end-of-string
+                    # This allows apostrophes inside single-quoted values (e.g. "cat's")
+                    rest = args_str[i + 1:].lstrip()
+                    if not rest or rest[0] in (',', ')'):
+                        in_quotes = False
+                    else:
+                        current_val += char
                 else:
                     current_val += char
                     
@@ -102,6 +110,9 @@ def validate_action(name: str, args: dict) -> tuple[bool, str]:
         
     if 'field' in args and args['field'] not in {'title', 'due', 'priority', 'tag', 'prio'}:
         return False, "Argument 'field' must be one of: title, due, priority, tag, prio"
+
+    if args.get('field') in {'prio', 'priority'} and args.get('value') not in {'low', 'med', 'high'}:
+        return False, "Argument 'value' for priority must be one of: low, med, high"
         
     if 'status' in args and args['status'] not in {'todo', 'done'}:
         return False, "Argument 'status' must be one of: todo, done"

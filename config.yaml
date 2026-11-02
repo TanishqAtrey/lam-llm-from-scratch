@@ -4,19 +4,23 @@ model:
   n_layers: 8
   n_heads: 8
   ff_dim: 2048
-  max_seq_len: 512        # 512 saves ~2x memory vs 1024 on Apple Silicon
+  max_seq_len: 1024       # 1024 supports full agent trajectories and RAG contexts
   dropout: 0.1
 
 training:
-  batch_size: 8           # safe for 8-16GB Apple Silicon
-  grad_accum_steps: 4     # simulates effective batch of 32 (8 × 4)
+  batch_size: 8           # safe for 8-16GB GPUs (<2.6GB peak VRAM with SDPA)
+  grad_accum_steps: 4     # simulates effective batch of 32 (8 × 4 = 32,768 tok/step)
   learning_rate: 0.0003
   weight_decay: 0.01
-  warmup_steps: 500
-  max_steps: 50000        # ~6-10h on M1/M2; increase on M3/M4
+  warmup_steps: 1000      # 1000 warmup steps for 92k schedule
+  max_steps: 92000        # ~3.0B tokens at 32,768 tok/step
   grad_clip: 1.0
-  save_every: 2000
+  save_every: 5000        # saves every ~1.5h on T4 GPU (~18 ckpts = ~3GB total disk)
   log_every: 50
+  # Early stopping (used by pretrain, SFT, LAM-SFT)
+  val_fraction: 0.05      # 5% reserved for validation (~150M tokens)
+  patience: 10            # pretrain: stop after N evals without val improvement
+  sft_patience: 3         # SFT/LAM-SFT: stop after N epochs without val improvement
 
 tokenizer:
   vocab_size: 16000
@@ -27,18 +31,18 @@ tokenizer:
   eos_token: "</s>"
 
 rag:
-  top_k: 5
-  chunk_size: 512
-  chunk_overlap: 64
+  top_k: 3                    # 3 chunks fit comfortably in 1024 context window
+  chunk_size: 150             # 150 words (~200 tokens) fits inside MiniLM's 256-token limit
+  chunk_overlap: 25           # ~15% overlap prevents broken sentences
   embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
   index_path: "data/embeddings/faiss.index"
 
 memory:
-  short_term_limit: 20
+  short_term_limit: 10        # 10 turns (prevents prompt blowout in multi-turn chat)
   long_term_top_k: 3
 
 inference:
-  max_new_tokens: 512
+  max_new_tokens: 512         # 512 leaves 512 tokens for prompt in 1024 context window
   temperature: 0.7
   top_p: 0.9
   top_k: 50
@@ -59,6 +63,11 @@ lam:
   trajectory_data: "data/lam/trajectories.jsonl"
   dpo_data: "data/lam/dpo.jsonl"
   reference_date: "2025-01-15"
+  # Agent confidence gating
+  confidence_threshold: 0.3   # below this: refuse to execute, ask user
+  confidence_warning: 0.5     # below this: execute but log warning
+  # Task store display limits
+  list_display_limit: 6       # max tasks shown in list()/find() results
   tier_weights:
     tier1: 0.20
     tier2: 0.15
@@ -73,3 +82,17 @@ lam:
     max_new_tokens: 64
     top_k: 1
     top_p: 1.0
+
+dpo:
+  beta: 0.1               # DPO temperature (higher = stronger preference signal; lower = stronger reference model regularization)
+  learning_rate: 1e-6      # very low LR for alignment
+  weight_decay: 0.0        # no weight decay for DPO (standard practice)
+  grad_clip: 1.0           # gradient clipping for DPO
+
+lora:
+  rank: 8                  # LoRA rank (4-16 typical range)
+  alpha: 16.0              # LoRA alpha (usually 2x rank)
+  dropout: 0.05            # LoRA dropout
+  target_modules:           # which layers to inject LoRA into
+    - "q_proj"
+    - "v_proj"

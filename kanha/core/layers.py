@@ -25,25 +25,32 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) * self.weight
+        orig_dtype = x.dtype
+        x_fp32 = x.float()
+        normed = x_fp32 * torch.rsqrt(x_fp32.pow(2).mean(-1, keepdim=True) + self.eps)
+        return (normed * self.weight).to(orig_dtype)
 
 
 # ─── 2. Rotary Positional Embedding (RoPE) ────────────────────────────────────
 class RotaryEmbedding(nn.Module):
-    def __init__(self, dim: int, max_seq_len: int = 2048, base: int = 10000):
+    def __init__(self, dim: int, max_seq_len: int = 4096, base: int = 10000):
         super().__init__()
         inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
         self.register_buffer("inv_freq", inv_freq)
+        self.max_seq_len = max_seq_len
         self._build_cache(max_seq_len)
 
     def _build_cache(self, seq_len: int):
-        t     = torch.arange(seq_len, device=self.inv_freq.device).float()
+        self.max_seq_len = max(seq_len, getattr(self, "max_seq_len", seq_len))
+        t     = torch.arange(self.max_seq_len, device=self.inv_freq.device).float()
         freqs = torch.outer(t, self.inv_freq)
         emb   = torch.cat([freqs, freqs], dim=-1)
-        self.register_buffer("cos_cached", emb.cos())
-        self.register_buffer("sin_cached", emb.sin())
+        self.register_buffer("cos_cached", emb.cos(), persistent=False)
+        self.register_buffer("sin_cached", emb.sin(), persistent=False)
 
     def forward(self, seq_len: int, offset: int = 0):
+        if offset + seq_len > self.max_seq_len:
+            self._build_cache(max(offset + seq_len, self.max_seq_len * 2))
         return (
             self.cos_cached[offset:offset + seq_len].unsqueeze(0).unsqueeze(0),
             self.sin_cached[offset:offset + seq_len].unsqueeze(0).unsqueeze(0),
@@ -56,7 +63,9 @@ def rotate_half(x: torch.Tensor) -> torch.Tensor:
 
 
 def apply_rope(q, k, cos, sin):
-    return (q * cos) + (rotate_half(q) * sin), (k * cos) + (rotate_half(k) * sin)
+    q_out = (q * cos) + (rotate_half(q) * sin)
+    k_out = (k * cos) + (rotate_half(k) * sin)
+    return q_out.to(q.dtype), k_out.to(k.dtype)
 
 
 # ─── 3. Multi-Head Attention (with SDPA) ──────────────────────────────────────
@@ -110,15 +119,26 @@ class MultiHeadAttention(nn.Module):
             new_cache = (k, v)
 
         # ── SDPA: single fused kernel — no manual mask, no manual matmuls ──
-        # is_causal=True is needed during training AND during prefill (first
-        # inference pass where kv_cache is None and the full prompt is fed).
-        # is_causal=False only during decode steps where kv_cache is already
-        # populated — the cached K/V are already causally ordered.
-        is_causal = not use_cache or kv_cache is None
-        dropout_p = self.dropout if self.training else 0.0
+        # is_causal=True when S > 1 and no past KV cache is present (training or prefill).
+        # When decoding single token with past KV cache, no mask is needed (is_causal=False).
+        # When evaluating a chunk (S > 1) with existing KV cache, an explicit lower-right
+        # aligned mask is needed to prevent PyTorch's default upper-left masking of the cache.
+        attn_mask = None
+        if kv_cache is None:
+            is_causal = S > 1
+        else:
+            is_causal = False
+            if S > 1:
+                row_idx = torch.arange(S, device=x.device).unsqueeze(1)
+                col_idx = torch.arange(k.shape[2], device=x.device).unsqueeze(0)
+                attn_mask = col_idx <= (row_idx + offset)
+
+        # MPS backend may fail silently with dropout_p > 0 in SDPA
+        dropout_p = self.dropout if self.training and x.device.type != 'mps' else 0.0
 
         out = F.scaled_dot_product_attention(
             q, k, v,
+            attn_mask=attn_mask,
             dropout_p=dropout_p,
             is_causal=is_causal,
         )

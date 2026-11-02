@@ -71,6 +71,11 @@ class AgentState(TypedDict):
     abort_reason: str
     final_message: str
     success: bool
+    confidence: float
+    confidence_threshold: float
+    confidence_scores: list[float]
+    low_confidence_count: int
+    retry_history: list[dict]
 
 
 # ── Result dataclass (matches TaskAgent's AgentResult) ────────────────────────
@@ -89,6 +94,9 @@ class LangGraphAgentResult:
     aborted: bool = False
     abort_reason: Optional[str] = None
     num_steps: int = 0
+    confidence_scores: list[float] = field(default_factory=list)
+    low_confidence_count: int = 0
+    retry_history: list[dict] = field(default_factory=list)
 
 
 # ── Node functions ────────────────────────────────────────────────────────────
@@ -100,9 +108,9 @@ def _make_generate_node(llm: KanhaLLM):
         prompt = format_step_prompt(state["goal"], state["history"])
 
         temp = 0.0 if state["retry_count"] == 0 else 0.3
-        raw = llm.generate_action(prompt, temperature=temp)
+        raw, confidence = llm.generate_action_with_confidence(prompt, temperature=temp)
 
-        return {"raw_action": raw}
+        return {"raw_action": raw, "confidence": confidence}
 
     return generate_node
 
@@ -112,35 +120,90 @@ def _make_parse_node():
 
     def parse_node(state: AgentState) -> dict:
         raw = state["raw_action"]
+        confidence = state.get("confidence", 0.0)
+        conf_threshold = state.get("confidence_threshold", 0.3)
+        retry_hist = list(state.get("retry_history", []))
+        low_conf = state.get("low_confidence_count", 0)
 
         if not raw:
+            retry_hist.append({
+                "action": "",
+                "observation": "Empty action generated",
+                "valid": False,
+                "step_num": state["step_count"] + 1,
+                "confidence": 0.0,
+            })
             return {
                 "parsed_name": "",
                 "parsed_args": {},
                 "retry_count": state["retry_count"] + 1,
+                "retry_history": retry_hist,
+                "low_confidence_count": low_conf,
+            }
+
+        # Confidence gate: refuse if model is too uncertain
+        if confidence < conf_threshold:
+            error_msg = (
+                f"Low confidence ({confidence:.2f} < {conf_threshold}) "
+                f"— action '{raw}' not executed. "
+                f"Please clarify the goal or try a simpler request."
+            )
+            retry_hist.append({
+                "action": raw,
+                "observation": error_msg,
+                "valid": False,
+                "step_num": state["step_count"] + 1,
+                "confidence": confidence,
+            })
+            return {
+                "parsed_name": "",
+                "parsed_args": {},
+                "retry_count": state["retry_count"] + 1,
+                "retry_history": retry_hist,
+                "low_confidence_count": low_conf + 1,
             }
 
         try:
             name, args = parse_action(raw)
-        except ActionParseError:
+        except ActionParseError as e:
+            retry_hist.append({
+                "action": raw,
+                "observation": f"Parse error: {str(e)}",
+                "valid": False,
+                "step_num": state["step_count"] + 1,
+                "confidence": confidence,
+            })
             return {
                 "parsed_name": "",
                 "parsed_args": {},
                 "retry_count": state["retry_count"] + 1,
+                "retry_history": retry_hist,
+                "low_confidence_count": low_conf,
             }
 
         valid, error_msg = validate_action(name, args)
         if not valid:
+            retry_hist.append({
+                "action": raw,
+                "observation": f"Validation error: {error_msg}",
+                "valid": False,
+                "step_num": state["step_count"] + 1,
+                "confidence": confidence,
+            })
             return {
                 "parsed_name": "",
                 "parsed_args": {},
                 "retry_count": state["retry_count"] + 1,
+                "retry_history": retry_hist,
+                "low_confidence_count": low_conf,
             }
 
         return {
             "parsed_name": name,
             "parsed_args": args,
             "retry_count": 0,  # reset on success
+            "retry_history": retry_hist,
+            "low_confidence_count": low_conf,
         }
 
     return parse_node
@@ -155,19 +218,22 @@ def _make_execute_node(env: TaskEnvironment):
 
     def execute_node(state: AgentState) -> dict:
         raw_action = state["raw_action"]
+        confidence = state.get("confidence", 0.0)
 
         # Execute through the environment (updates env._history)
         observation, is_terminal = env.step(raw_action)
 
         new_history = state["history"] + [
-            {"action": raw_action, "observation": observation}
+            {"action": raw_action, "observation": observation, "confidence": confidence}
         ]
+        conf_scores = list(state.get("confidence_scores", [])) + [confidence]
 
         result: dict = {
             "observation": observation,
             "is_terminal": is_terminal,
             "step_count": state["step_count"] + 1,
             "history": new_history,
+            "confidence_scores": conf_scores,
         }
 
         if is_terminal:
@@ -224,9 +290,15 @@ def _after_execute(state: AgentState) -> str:
 # ── Abort nodes ───────────────────────────────────────────────────────────────
 
 def _abort_parse_node(state: AgentState) -> dict:
+    retry_hist = state.get("retry_history", [])
+    if retry_hist:
+        last_obs = retry_hist[-1].get("observation", "")
+        abort_reason = f"Action generation failed after retries: {last_obs}"
+    else:
+        abort_reason = "Action generation failed after retries"
     return {
         "aborted": True,
-        "abort_reason": "Action generation failed after retries",
+        "abort_reason": abort_reason,
     }
 
 
@@ -326,14 +398,21 @@ class LangGraphTaskAgent:
         model: Any,
         tokenizer: Any,
         environment: TaskEnvironment,
-        max_steps: int = 8,
-        max_retries: int = 3,
+        max_steps: Optional[int] = None,
+        max_retries: Optional[int] = None,
+        confidence_threshold: Optional[float] = None,
     ):
+        from kanha.utils.config import cfg
+        lam_cfg = getattr(cfg, "lam", None)
+        self.max_steps = max_steps if max_steps is not None else (getattr(lam_cfg, "max_steps_per_trajectory", 8) if lam_cfg else 8)
+        self.max_retries = max_retries if max_retries is not None else (getattr(lam_cfg, "max_retries_on_invalid", 3) if lam_cfg else 3)
+        self.confidence_threshold = (
+            confidence_threshold if confidence_threshold is not None
+            else (getattr(lam_cfg, "confidence_threshold", 0.3) if lam_cfg else 0.3)
+        )
         self.llm = KanhaLLM(model=model, tokenizer=tokenizer)
         self.env = environment
         self.tools = build_task_tools(environment.store)
-        self.max_steps = max_steps
-        self.max_retries = max_retries
 
         self.graph = build_agent_graph(self.llm, self.env)
 
@@ -367,6 +446,11 @@ class LangGraphTaskAgent:
             "abort_reason": "",
             "final_message": "",
             "success": False,
+            "confidence": 0.0,
+            "confidence_threshold": self.confidence_threshold,
+            "confidence_scores": [],
+            "low_confidence_count": 0,
+            "retry_history": [],
         }
 
         # Run the graph
@@ -379,6 +463,9 @@ class LangGraphTaskAgent:
         result.abort_reason = final_state.get("abort_reason") or None
         result.final_message = final_state.get("final_message") or None
         result.num_steps = final_state.get("step_count", 0)
+        result.confidence_scores = final_state.get("confidence_scores", [])
+        result.low_confidence_count = final_state.get("low_confidence_count", 0)
+        result.retry_history = final_state.get("retry_history", [])
 
         # Reconstruct step records from history
         for i, h in enumerate(final_state.get("history", [])):
@@ -387,6 +474,18 @@ class LangGraphTaskAgent:
                 "observation": h["observation"],
                 "valid": True,
                 "step_num": i + 1,
+                "confidence": h.get("confidence", 0.0),
+            })
+
+        # If aborted on parse, append the failed step just like TaskAgent does
+        if result.aborted and final_state.get("parsed_name") == "" and result.retry_history:
+            last_retry = result.retry_history[-1]
+            result.steps.append({
+                "action": last_retry.get("action", ""),
+                "observation": last_retry.get("observation", ""),
+                "valid": False,
+                "step_num": result.num_steps + 1,
+                "confidence": last_retry.get("confidence", 0.0),
             })
 
         return result

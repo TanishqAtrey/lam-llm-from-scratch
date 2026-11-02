@@ -69,107 +69,103 @@ def print_size(path):
         print(f"  ✓  Size: {size/1e3:.1f} KB")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DATASET 1: WikiText-103
+# DATASET 1: FineWeb-Edu (High quality educational web text ~1.5B tokens)
 # ─────────────────────────────────────────────────────────────────────────────
-def download_wikitext():
-    separator("1/6  WikiText-103  (clean Wikipedia)")
-    out = RAW_DIR / "wiki103.txt"
-
-    if already_done(out, min_bytes=10_000_000):
-        print(f"  Already downloaded → {out}")
-        print_size(out)
-        return
-
-    print("  Downloading from Hugging Face...")
-    ds = load_dataset(
-        "wikitext",
-        "wikitext-103-raw-v1",
-        split="train",
-        trust_remote_code=True,
-    )
-
-    written = 0
-    with open(out, "w", encoding="utf-8") as f:
-        for row in tqdm(ds, desc="  Writing WikiText"):
-            text = row["text"].strip()
-            if text and len(text) > 50:      # skip section headers and blanks
-                f.write(text + "\n\n")
-                written += 1
-
-    print(f"  ✓  {written:,} paragraphs written → {out}")
-    print_size(out)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# DATASET 2: TinyStories
-# ─────────────────────────────────────────────────────────────────────────────
-def download_tinystories():
-    separator("2/6  TinyStories  (short stories — great for fluency)")
-    out = RAW_DIR / "tinystories.txt"
+def download_fineweb_edu(max_docs=400_000):
+    separator("1/6  FineWeb-Edu  (educational web text, 1.5B token target)")
+    out = RAW_DIR / "fineweb_edu.txt"
 
     if already_done(out, min_bytes=50_000_000):
         print(f"  Already downloaded → {out}")
         print_size(out)
         return
 
-    print("  Downloading from Hugging Face (streaming)...")
+    print("  Streaming from Hugging Face (HuggingFaceFW/fineweb-edu, sample-10BT)...")
     ds = load_dataset(
-        "roneneldan/TinyStories",
+        "HuggingFaceFW/fineweb-edu",
+        name="sample-10BT",
         split="train",
         streaming=True,
-        trust_remote_code=True,
     )
 
-    MAX_STORIES = 500_000    # ~1GB — enough without being excessive
     written = 0
-
     with open(out, "w", encoding="utf-8") as f:
-        for row in tqdm(ds, desc="  Writing TinyStories", total=MAX_STORIES):
-            if written >= MAX_STORIES:
+        for row in tqdm(ds, desc="  Writing FineWeb-Edu", total=max_docs):
+            if written >= max_docs:
                 break
-            text = row["text"].strip()
-            if text:
-                f.write(text + "\n\n")
-                written += 1
-
-    print(f"  ✓  {written:,} stories written → {out}")
-    print_size(out)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# DATASET 3: OpenWebText
-# ─────────────────────────────────────────────────────────────────────────────
-def download_openwebtext():
-    separator("3/6  OpenWebText  (diverse web text)")
-    out = RAW_DIR / "openwebtext.txt"
-
-    if already_done(out, min_bytes=50_000_000):
-        print(f"  Already downloaded → {out}")
-        print_size(out)
-        return
-
-    print("  Downloading from Hugging Face (streaming, 100k docs)...")
-    ds = load_dataset(
-        "Skylion007/openwebtext",
-        split="train",
-        streaming=True,
-        trust_remote_code=True,
-    )
-
-    MAX_DOCS = 100_000
-    written  = 0
-
-    with open(out, "w", encoding="utf-8") as f:
-        for row in tqdm(ds, desc="  Writing OpenWebText", total=MAX_DOCS):
-            if written >= MAX_DOCS:
-                break
-            text = row["text"].strip()
-            # Basic quality filter: skip very short docs
-            if text and len(text.split()) > 100:
+            text = row.get("text", "").strip()
+            if text and len(text.split()) > 60:
                 f.write(text + "\n\n")
                 written += 1
 
     print(f"  ✓  {written:,} documents written → {out}")
+    print_size(out)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DATASET 2: Cosmopedia v2 (Synthetic textbooks & articles ~1.0B tokens)
+# ─────────────────────────────────────────────────────────────────────────────
+def download_cosmopedia(max_docs=300_000):
+    separator("2/6  Cosmopedia v2  (synthetic textbooks & course explanations)")
+    out = RAW_DIR / "cosmopedia.txt"
+
+    if already_done(out, min_bytes=50_000_000):
+        print(f"  Already downloaded → {out}")
+        print_size(out)
+        return
+
+    print("  Streaming from Hugging Face (HuggingFaceTB/smollm-corpus, cosmopedia-v2)...")
+    ds = load_dataset(
+        "HuggingFaceTB/smollm-corpus",
+        name="cosmopedia-v2",
+        split="train",
+        streaming=True,
+    )
+
+    written = 0
+    with open(out, "w", encoding="utf-8") as f:
+        for row in tqdm(ds, desc="  Writing Cosmopedia", total=max_docs):
+            if written >= max_docs:
+                break
+            text = row.get("text", "").strip()
+            if text and len(text) > 100:
+                f.write(text + "\n\n")
+                written += 1
+
+    print(f"  ✓  {written:,} textbooks/articles written → {out}")
+    print_size(out)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DATASET 3: Python-Edu / Code (Clean Python programming logic ~500M tokens)
+# ─────────────────────────────────────────────────────────────────────────────
+def download_python_edu(max_samples=250_000):
+    separator("3/6  Python Code  (code logic & syntax for reasoning / LAM)")
+    out = RAW_DIR / "python_code.txt"
+
+    if already_done(out, min_bytes=30_000_000):
+        print(f"  Already downloaded → {out}")
+        print_size(out)
+        return
+
+    print("  Streaming from Hugging Face (jtatman/python-code-dataset-500k)...")
+    ds = load_dataset(
+        "jtatman/python-code-dataset-500k",
+        split="train",
+        streaming=True,
+    )
+
+    written = 0
+    with open(out, "w", encoding="utf-8") as f:
+        for row in tqdm(ds, desc="  Writing Python Code", total=max_samples):
+            if written >= max_samples:
+                break
+            text = row.get("text", "").strip()
+            if text and len(text) > 80:
+                f.write(text + "\n\n")
+                written += 1
+
+    print(f"  ✓  {written:,} code samples written → {out}")
     print_size(out)
 
 
@@ -237,12 +233,10 @@ def download_openhermes():
         print_size(out)
         return
 
-    print("  Downloading from Hugging Face (streaming, 20k samples)...")
+    print("  Downloading from Hugging Face (20k samples)...")
     ds = load_dataset(
         "teknium/OpenHermes-2.5",
         split="train",
-        
-        trust_remote_code=True,
     )
 
     MAX_SAMPLES = 20_000
@@ -404,9 +398,9 @@ def print_summary():
     print(f"{'='*60}\n")
 
     pre_train_files = [
-        RAW_DIR / "wiki103.txt",
-        RAW_DIR / "tinystories.txt",
-        RAW_DIR / "openwebtext.txt",
+        RAW_DIR / "fineweb_edu.txt",
+        RAW_DIR / "cosmopedia.txt",
+        RAW_DIR / "python_code.txt",
     ]
     sft_file = PROCESSED_DIR / "sft_combined.jsonl"
     dpo_file = PROCESSED_DIR / "dpo.jsonl"
@@ -448,15 +442,15 @@ def print_summary():
 if __name__ == "__main__":
     print("\n  KANHA Dataset Downloader")
     print("  Downloading all training data...\n")
-    print("  Note: First run downloads from Hugging Face (~3-4GB total).")
+    print("  Note: Streams directly from Hugging Face.")
     print("  Subsequent runs are instant (skips already-downloaded files).\n")
 
     start = time.time()
 
     try:
-        download_wikitext()
-        download_tinystories()
-        download_openwebtext()
+        download_fineweb_edu()
+        download_cosmopedia()
+        download_python_edu()
         download_alpaca()
         download_openhermes()
         download_hh_rlhf()

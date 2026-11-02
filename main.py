@@ -31,18 +31,34 @@ def main():
     chat_p.add_argument("--tools",  action="store_true")
 
     # ── train ─────────────────────────────────────────────────────────────
-    train_p = sub.add_parser("train", help="Pre-train from scratch")
+    train_p = sub.add_parser("train", aliases=["pretrain"], help="Pre-train from scratch")
     train_p.add_argument("--data",   required=True)
     train_p.add_argument("--resume", default=None)
+    train_p.add_argument("--val_fraction", type=float, default=0.1,
+                         help="Fraction of data for validation (default 0.1)")
+    train_p.add_argument("--patience", type=int, default=5,
+                         help="Early stop after N evals without val improvement")
+    train_p.add_argument("--eval_every", type=int, default=None,
+                         help="Evaluate val loss every N steps (default=save_every)")
 
     # ── finetune ──────────────────────────────────────────────────────────
-    ft_p = sub.add_parser("finetune", help="SFT fine-tuning")
-    ft_p.add_argument("--base_model", required=True)  # FIX: was --base, but sft_train() reads args.base_model
+    ft_p = sub.add_parser("finetune", aliases=["sft"], help="SFT fine-tuning")
+    ft_p.add_argument("--base_model", "--base", "--model", dest="base_model", required=True)
     ft_p.add_argument("--data",   required=True)
     ft_p.add_argument("--output", default="models/finetuned/")
     ft_p.add_argument("--epochs", type=int, default=3)
     ft_p.add_argument("--batch_size", type=int, default=1)
     ft_p.add_argument("--lr",         type=float, default=3e-5)
+    ft_p.add_argument("--val_fraction", type=float, default=0.1,
+                       help="Fraction of data for validation (default 0.1)")
+    ft_p.add_argument("--patience", type=int, default=3,
+                       help="Early stop after N epochs without val improvement")
+
+    # ── train-tokenizer ───────────────────────────────────────────────────
+    tok_p = sub.add_parser("train-tokenizer", help="Train a new BPE tokenizer")
+    tok_p.add_argument("--data", "--input", dest="data", required=True, help="Input text file(s)")
+    tok_p.add_argument("--output", "--model_prefix", dest="output", default="models/tokenizer/tokenizer", help="Output prefix")
+    tok_p.add_argument("--vocab_size", type=int, default=None, help="Vocabulary size")
 
     # ── index ─────────────────────────────────────────────────────────────
     idx_p = sub.add_parser("index", help="Build FAISS index from documents")
@@ -58,6 +74,7 @@ def main():
     dpo_p.add_argument("--batch_size", type=int, default=1)
     dpo_p.add_argument("--lr",         type=float, default=1e-6)
     dpo_p.add_argument("--beta",       type=float, default=0.1)
+    dpo_p.add_argument("--lam_mode",   action="store_true", help="Enable LAM DPO mode for agent trajectories")
 
     # ── api ───────────────────────────────────────────────────────────────
     api_p = sub.add_parser("api", help="Start FastAPI server")
@@ -68,21 +85,25 @@ def main():
     # ── lam-generate ──────────────────────────────────────────────────────
     lamgen_p = sub.add_parser("lam-generate", help="Generate LAM training data")
     lamgen_p.add_argument("--output", default="data/lam/trajectories.jsonl")
-    lamgen_p.add_argument("--count",  type=int, default=100000)
+    lamgen_p.add_argument("--count", "--num", dest="count", type=int, default=100000)
     lamgen_p.add_argument("--seed",   type=int, default=42)
 
     # ── lam-train ─────────────────────────────────────────────────────────
     lamtrain_p = sub.add_parser("lam-train", help="SFT training for LAM")
-    lamtrain_p.add_argument("--base_model", required=True)
+    lamtrain_p.add_argument("--base_model", "--model", dest="base_model", required=True)
     lamtrain_p.add_argument("--data",       required=True)
     lamtrain_p.add_argument("--output",     default="models/lam/")
     lamtrain_p.add_argument("--epochs",     type=int, default=3)
     lamtrain_p.add_argument("--batch_size", type=int, default=4)
     lamtrain_p.add_argument("--lr",         type=float, default=3e-5)
+    lamtrain_p.add_argument("--val_fraction", type=float, default=0.1,
+                             help="Fraction of data for validation (default 0.1)")
+    lamtrain_p.add_argument("--patience", type=int, default=3,
+                             help="Early stop after N epochs without val improvement")
 
     # ── lam-dpo ───────────────────────────────────────────────────────────
     lamdpo_p = sub.add_parser("lam-dpo", help="DPO alignment for LAM")
-    lamdpo_p.add_argument("--base_model", required=True)
+    lamdpo_p.add_argument("--base_model", "--model", dest="base_model", required=True)
     lamdpo_p.add_argument("--data",       required=True)
     lamdpo_p.add_argument("--output",     default="models/lam/")
     lamdpo_p.add_argument("--epochs",     type=int, default=1)
@@ -100,8 +121,18 @@ def main():
     # ── lam-eval ──────────────────────────────────────────────────────────
     lameval_p = sub.add_parser("lam-eval", help="Evaluate LAM agent")
     lameval_p.add_argument("--model",     required=True)
-    lameval_p.add_argument("--test_data", required=True)
+    lameval_p.add_argument("--test_data", "--data", dest="test_data", required=True)
     lameval_p.add_argument("--output",    default="results/lam_eval.json")
+
+    # ── mine-dpo ──────────────────────────────────────────────────────────
+    mine_p = sub.add_parser("mine-dpo", help="Auto-mine DPO pairs from agent trajectories")
+    mine_p.add_argument("--model",     required=True)
+    mine_p.add_argument("--eval_data", required=True,
+                        help="JSONL with goals, worlds, and oracle steps")
+    mine_p.add_argument("--output",    default="data/lam/dpo_pairs.jsonl")
+    mine_p.add_argument("--max_goals", type=int, default=500,
+                        help="Max goals to evaluate (default 500)")
+    mine_p.add_argument("--reference_date", default="2025-01-15")
 
     args = parser.parse_args()
 
@@ -110,13 +141,21 @@ def main():
         from cli import run_cli
         run_cli(args)
 
-    elif args.command == "train":
+    elif args.command in ("train", "pretrain"):
         from kanha.training.train import train
         train(args)
 
-    elif args.command == "finetune":
+    elif args.command in ("finetune", "sft"):
         from kanha.finetune.sft_train import sft_train
         sft_train(args)
+
+    elif args.command == "train-tokenizer":
+        from kanha.core.tokenizer import train_tokenizer
+        train_tokenizer(
+            input_files=args.data,
+            model_prefix=args.output,
+            vocab_size=args.vocab_size,
+        )
 
     elif args.command == "dpo":
         from kanha.finetune.dpo_train import dpo_train
@@ -145,6 +184,10 @@ def main():
 
     elif args.command == "lam-eval":
         _lam_eval(args)
+
+    elif args.command == "mine-dpo":
+        from scripts.mine_dpo_pairs import mine_dpo_pairs
+        mine_dpo_pairs(args)
 
 
 def _build_index(args):

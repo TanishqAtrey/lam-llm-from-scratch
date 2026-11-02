@@ -104,7 +104,9 @@ def run_agent_cli(args):
         # Run agent
         result = agent.run(goal)
         for i, step in enumerate(result.steps):
-            console.print(f"  Step {i+1}: [cyan]{step['action']}[/cyan]")
+            conf = step.get('confidence', None)
+            conf_str = f" [conf={conf:.2f}]" if conf is not None else ""
+            console.print(f"  Step {i+1}: [cyan]{step['action']}[/cyan]{conf_str}")
             console.print(f"    [dim]→ {step['observation']}[/dim]")
 
         if result.success:

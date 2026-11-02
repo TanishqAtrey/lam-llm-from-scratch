@@ -22,6 +22,7 @@ class VectorStore:
         self.dim = dim
         self.index = None
         self.metadata: List[Dict] = []
+        self._faiss = None
 
         try:
             import faiss
@@ -86,6 +87,8 @@ class VectorStore:
         """Saves the index and metadata to disk."""
         os.makedirs(save_dir, exist_ok=True)
         if self.index is not None:
+            if not hasattr(self, "_faiss") or self._faiss is None:
+                raise RuntimeError("FAISS is not installed. Run: pip install faiss-cpu")
             self._faiss.write_index(self.index, os.path.join(save_dir, "faiss.index"))
         with open(os.path.join(save_dir, "metadata.json"), "w") as f:
             json.dump(self.metadata, f)
@@ -97,6 +100,8 @@ class VectorStore:
         meta_path = os.path.join(load_dir, "metadata.json")
 
         if os.path.exists(index_path):
+            if not hasattr(self, "_faiss") or self._faiss is None:
+                raise RuntimeError("FAISS is not installed. Run: pip install faiss-cpu")
             self.index = self._faiss.read_index(index_path)
         if os.path.exists(meta_path):
             with open(meta_path, "r") as f:

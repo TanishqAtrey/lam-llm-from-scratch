@@ -101,20 +101,20 @@ pip install -r requirements.txt
 
 ```bash
 # Train tokenizer
-python main.py train-tokenizer
+python main.py train-tokenizer --data data/raw/
 
 # Download and preprocess data
 python scripts/download_datasets.py
 python scripts/preprocess_data.py
 
 # Pretrain
-python main.py pretrain
+python main.py pretrain --data data/processed/train.npy
 
 # SFT
-python main.py sft
+python main.py sft --base_model models/base/final_model.pt --data data/processed/sft_combined.jsonl
 
 # DPO (optional)
-python main.py dpo
+python main.py dpo --base_model models/finetuned/sft_final.pt --data data/processed/dpo.jsonl
 ```
 
 ### 3. Train the LAM

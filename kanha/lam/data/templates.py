@@ -157,11 +157,13 @@ def add_filler(goal: str, rng: random.Random) -> str:
 
 def random_casing(goal: str, rng: random.Random) -> str:
     r = rng.random()
-    if r < 0.33:
+    if r < 0.25:
         return goal.lower()
-    elif r < 0.66:
+    elif r < 0.50:
         return goal.upper()
-    return goal.title()
+    elif r < 0.75:
+        return goal.title()
+    return goal  # preserve original casing
 
 def inject_typo(goal: str, rng: random.Random) -> str:
     if rng.random() > 0.3 or len(goal) < 4:

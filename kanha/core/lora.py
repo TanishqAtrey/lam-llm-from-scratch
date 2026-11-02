@@ -34,50 +34,67 @@ class LoRALinear(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         base_out = self.linear(x)
-
-        if x.dtype in (torch.float16, torch.bfloat16):
-            lora_x   = self.lora_dropout(x.float())
-            lora_out = (lora_x @ self.lora_A.T) @ self.lora_B.T
-            return base_out + (lora_out * self.scaling).to(x.dtype)
-        else:
-            lora_x   = self.lora_dropout(x)
-            lora_out = (lora_x @ self.lora_A.T) @ self.lora_B.T
-            return base_out + lora_out * self.scaling
+        lora_x = self.lora_dropout(x).to(self.lora_A.dtype)
+        lora_out = (lora_x @ self.lora_A.T) @ self.lora_B.T
+        return base_out + (lora_out * self.scaling).to(x.dtype)
 
     def merge(self) -> nn.Linear:
         merged = nn.Linear(self.linear.in_features, self.linear.out_features,
-                           bias=self.linear.bias is not None)
-        merged.weight.data = self.linear.weight.data + (self.scaling * self.lora_B @ self.lora_A)
+                           bias=self.linear.bias is not None,
+                           device=self.linear.weight.device,
+                           dtype=self.linear.weight.dtype)
+        delta = (self.scaling * self.lora_B @ self.lora_A).to(
+            dtype=self.linear.weight.dtype, device=self.linear.weight.device
+        )
+        merged.weight.data = self.linear.weight.data + delta
         if self.linear.bias is not None:
             merged.bias.data = self.linear.bias.data.clone()
         return merged
 
 
 class LoRAModel(nn.Module):
-    def __init__(self, model: nn.Module, rank: int = 8, alpha: float = None,
-                 lora_dropout: float = 0.05, target_modules: Optional[List[str]] = None):
+    def __init__(self, model: nn.Module, rank: int = None, alpha: float = None,
+                 lora_dropout: float = None, target_modules: Optional[List[str]] = None):
         super().__init__()
-        self.model          = model
-        self.rank           = rank
-        self.alpha          = alpha or float(rank)
-        self.target_modules = target_modules or ["q_proj", "v_proj"]
+        self.model = model
+
+        # Read defaults from config, fall back to sensible values
+        try:
+            from kanha.utils.config import cfg
+            lora_cfg = getattr(cfg, 'lora', None)
+        except Exception:
+            lora_cfg = None
+
+        self.rank = rank if rank is not None else (getattr(lora_cfg, 'rank', 8) if lora_cfg else 8)
+        self.alpha = alpha if alpha is not None else (getattr(lora_cfg, 'alpha', float(self.rank)) if lora_cfg else float(self.rank))
+        _dropout = lora_dropout if lora_dropout is not None else (getattr(lora_cfg, 'dropout', 0.05) if lora_cfg else 0.05)
+
+        if target_modules is not None:
+            self.target_modules = target_modules
+        elif lora_cfg and hasattr(lora_cfg, 'target_modules'):
+            self.target_modules = list(lora_cfg.target_modules) if not isinstance(lora_cfg.target_modules, list) else lora_cfg.target_modules
+        else:
+            self.target_modules = ["q_proj", "v_proj"]
+
         for param in self.model.parameters():
             param.requires_grad = False
-        self._inject_lora(lora_dropout)
+        self._inject_lora(_dropout)
 
     def _inject_lora(self, dropout: float):
-        replaced = 0
+        to_replace = []
         for name, module in self.model.named_modules():
             parent_name, child_name = self._split_name(name)
             if child_name not in self.target_modules:
                 continue
             if not isinstance(module, nn.Linear):
                 continue
+            to_replace.append((parent_name, child_name, module))
+
+        for parent_name, child_name, module in to_replace:
             parent = self._get_module(self.model, parent_name)
             setattr(parent, child_name,
                     LoRALinear(module, rank=self.rank, alpha=self.alpha, dropout=dropout))
-            replaced += 1
-        log.info(f"LoRA injected into {replaced} linear layers (rank={self.rank}, target={self.target_modules})")
+        log.info(f"LoRA injected into {len(to_replace)} linear layers (rank={self.rank}, target={self.target_modules})")
 
     @staticmethod
     def _split_name(name):
@@ -92,6 +109,14 @@ class LoRAModel(nn.Module):
             model = getattr(model, part)
         return model
 
+    def __getattr__(self, name: str):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            if "model" in self.__dict__ or ("_modules" in self.__dict__ and "model" in self._modules):
+                return getattr(self.model, name)
+            raise
+
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)
 
@@ -101,14 +126,63 @@ class LoRAModel(nn.Module):
         log.info(f"LoRA params: {trained:,} trainable / {total:,} total ({100.*trained/total:.2f}%)")
 
     def merge_and_unload(self):
+        to_merge = []
         for name, module in self.model.named_modules():
             parent_name, child_name = self._split_name(name)
             if not isinstance(module, LoRALinear):
                 continue
+            to_merge.append((parent_name, child_name, module))
+
+        for parent_name, child_name, module in to_merge:
             parent = self._get_module(self.model, parent_name)
             setattr(parent, child_name, module.merge())
         log.info("LoRA weights merged into base model.")
         return self.model
+
+    def save_pretrained(self, path: str, merge: bool = True):
+        """
+        Saves the model checkpoint.
+        If merge=True (default), merges LoRA adapter weights into base weights
+        first so the saved checkpoint can be loaded cleanly by KanhaModel.from_pretrained().
+        If merge=False, extracts the clean base weights with merged delta applied for serialization,
+        ensuring the saved checkpoint is always directly loadable by KanhaModel.from_pretrained()
+        without mutating the live in-memory LoRA model.
+        """
+        if merge:
+            merged_model = self.merge_and_unload()
+            merged_model.save_pretrained(path)
+        else:
+            clean_state = {}
+            for k, v in self.model.state_dict().items():
+                if ".linear." in k:
+                    base_k = k.replace(".linear.", ".")
+                    clean_state[base_k] = v.clone()
+                elif "lora_A" in k or "lora_B" in k:
+                    continue
+                else:
+                    clean_state[k] = v.clone()
+
+            for name, module in self.model.named_modules():
+                if isinstance(module, LoRALinear):
+                    weight_key = f"{name}.weight"
+                    delta = (module.scaling * module.lora_B @ module.lora_A).to(
+                        dtype=module.linear.weight.dtype, device=module.linear.weight.device
+                    )
+                    clean_state[weight_key] = module.linear.weight.data + delta
+
+            torch.save({
+                "model_config": {
+                    "vocab_size":  self.model.vocab_size,
+                    "dim":         self.model.dim,
+                    "n_layers":    self.model.n_layers,
+                    "n_heads":     self.model.n_heads,
+                    "ff_dim":      self.model.ff_dim,
+                    "max_seq_len": self.model.max_seq_len,
+                    "dropout":     self.model.dropout_p,
+                },
+                "model_state": clean_state,
+            }, path)
+            log.info(f"Model saved to {path} (compatible state_dict with LoRA applied)")
 
     def save_lora(self, path: str):
         lora_state = {k: v for k, v in self.state_dict().items()
@@ -118,6 +192,6 @@ class LoRAModel(nn.Module):
         log.info(f"LoRA weights saved to {path}")
 
     def load_lora(self, path: str):
-        checkpoint = torch.load(path, map_location="cpu")
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
         self.load_state_dict(checkpoint["lora_state"], strict=False)
         log.info(f"LoRA loaded from {path}")

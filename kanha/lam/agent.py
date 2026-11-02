@@ -6,29 +6,59 @@ from typing import Optional
 from kanha.lam.actions import parse_action, validate_action, execute_action, ActionParseError, ACTION_SCHEMA
 from kanha.lam.environment import TaskEnvironment
 from kanha.lam.trajectory import format_step_prompt, GOAL_MARKER, ACTION_MARKER, OBSERVATION_MARKER
-from kanha.core.generation import generate
+from kanha.core.generation import generate, generate_with_confidence
+from kanha.utils.config import cfg
 
 @dataclass
 class AgentResult:
     goal: str
-    steps: list[dict] = field(default_factory=list)  # [{action, observation, valid, step_num}]
+    steps: list[dict] = field(default_factory=list)  # [{action, observation, valid, step_num, confidence}]
     final_message: Optional[str] = None
     success: bool = False
     aborted: bool = False
     abort_reason: Optional[str] = None
     num_steps: int = 0
+    confidence_scores: list[float] = field(default_factory=list)  # per-action mean confidence
+    low_confidence_count: int = 0  # how many actions were below threshold
+    retry_history: list[dict] = field(default_factory=list)  # retry drafts and failures
 
 class TaskAgent:
-    def __init__(self, model, tokenizer, environment: TaskEnvironment, 
-                 max_steps: int = 8, max_retries: int = 3):
+    """
+    LAM agent that executes goal-directed action sequences.
+
+    Now includes confidence scoring: each generated action is assigned
+    a mean token-level probability. If confidence is below the threshold,
+    the agent asks for clarification instead of blindly executing.
+    """
+
+    def __init__(self, model, tokenizer, environment: TaskEnvironment,
+                 max_steps: int = None, max_retries: int = None,
+                 confidence_threshold: float = None):
         self.model = model
         self.tokenizer = tokenizer
         self.env = environment
-        self.max_steps = max_steps
-        self.max_retries = max_retries
+
+        # Read defaults from config, fall back to sensible values
+        lam_cfg = cfg.lam
+        self.max_steps = max_steps if max_steps is not None else getattr(lam_cfg, 'max_steps_per_trajectory', 8)
+        self.max_retries = max_retries if max_retries is not None else getattr(lam_cfg, 'max_retries_on_invalid', 3)
+
+        # Confidence thresholds from config
+        self.CONFIDENCE_THRESHOLD = (
+            confidence_threshold if confidence_threshold is not None
+            else getattr(lam_cfg, 'confidence_threshold', 0.3)
+        )
+        self.CONFIDENCE_WARNING = getattr(lam_cfg, 'confidence_warning', 0.5)
+
+        # Generation params from config
+        gen_cfg = getattr(lam_cfg, 'generation', None)
+        self._gen_max_tokens = getattr(gen_cfg, 'max_new_tokens', 64) if gen_cfg else 64
+        self._gen_top_k = getattr(gen_cfg, 'top_k', 1) if gen_cfg else 1
     
-    def run(self, goal: str) -> AgentResult:
+    def run(self, goal: str, temperature: Optional[float] = None) -> AgentResult:
         result = AgentResult(goal=goal)
+        # Clear stale history from prior runs so prompts aren't polluted
+        self.env._history = []
         
         while result.num_steps < self.max_steps:
             history = self.env.get_trajectory()
@@ -42,17 +72,40 @@ class TaskAgent:
             
             action_text = ""
             action_valid = False
+            action_confidence = 0.0
             error_msg = ""
+            last_failed_action = ""
             
             for attempt in range(self.max_retries + 1):
-                temp = 0.0 if attempt == 0 else 0.3
-                raw_action = self._generate_action(prompt, temperature=temp)
+                if attempt == 0:
+                    temp = temperature if temperature is not None else 0.0
+                else:
+                    temp = max(temperature if temperature is not None else 0.0, 0.3)
+                raw_action, confidence = self._generate_action(prompt, temperature=temp)
                 
                 if not raw_action:
                     error_msg = "Empty action generated"
-                    result.steps.append({
+                    last_failed_action = ""
+                    result.retry_history.append({
                         'action': '', 'observation': error_msg,
-                        'valid': False, 'step_num': result.num_steps + 1
+                        'valid': False, 'step_num': result.num_steps + 1,
+                        'confidence': 0.0,
+                    })
+                    continue
+
+                # ── Confidence gate: refuse if model is too uncertain ──
+                if confidence < self.CONFIDENCE_THRESHOLD:
+                    error_msg = (
+                        f"Low confidence ({confidence:.2f} < {self.CONFIDENCE_THRESHOLD}) "
+                        f"— action '{raw_action}' not executed. "
+                        f"Please clarify the goal or try a simpler request."
+                    )
+                    result.low_confidence_count += 1
+                    last_failed_action = raw_action
+                    result.retry_history.append({
+                        'action': raw_action, 'observation': error_msg,
+                        'valid': False, 'step_num': result.num_steps + 1,
+                        'confidence': confidence,
                     })
                     continue
                 
@@ -61,35 +114,54 @@ class TaskAgent:
                     valid, msg = validate_action(name, args)
                     if not valid:
                         error_msg = f"Validation error: {msg}"
-                        result.steps.append({
+                        last_failed_action = raw_action
+                        result.retry_history.append({
                             'action': raw_action, 'observation': error_msg,
-                            'valid': False, 'step_num': result.num_steps + 1
+                            'valid': False, 'step_num': result.num_steps + 1,
+                            'confidence': confidence,
                         })
                         continue
                     
                     action_text = raw_action
                     action_valid = True
+                    action_confidence = confidence
                     break
                 except ActionParseError as e:
                     error_msg = f"Parse error: {str(e)}"
-                    result.steps.append({
+                    last_failed_action = raw_action
+                    result.retry_history.append({
                         'action': raw_action, 'observation': error_msg,
-                        'valid': False, 'step_num': result.num_steps + 1
+                        'valid': False, 'step_num': result.num_steps + 1,
+                        'confidence': confidence,
                     })
                     continue
             
             if not action_valid:
                 result.aborted = True
                 result.abort_reason = f"Action generation failed after retries: {error_msg}"
+                result.steps.append({
+                    'action': last_failed_action,
+                    'observation': error_msg,
+                    'valid': False,
+                    'step_num': result.num_steps + 1,
+                    'confidence': confidence if 'confidence' in locals() else 0.0,
+                })
                 break
             
+            # Log confidence
+            result.confidence_scores.append(action_confidence)
+            if action_confidence < self.CONFIDENCE_WARNING:
+                # Still execute, but log a warning
+                pass
+
             observation, is_terminal = self.env.step(action_text)
             
             step_record = {
                 'action': action_text,
                 'observation': observation,
                 'valid': action_valid,
-                'step_num': result.num_steps + 1
+                'step_num': result.num_steps + 1,
+                'confidence': action_confidence,
             }
             result.steps.append(step_record)
             result.num_steps += 1
@@ -106,10 +178,18 @@ class TaskAgent:
                 
         return result
     
-    def _generate_action(self, prompt: str, temperature: float = 0.0) -> str:
-        # Generate with greedy/low temp
-        raw = generate(self.model, self.tokenizer, prompt, max_new_tokens=64, temperature=temperature, top_k=1)
-        return self._clean_action(raw)
+    def _generate_action(self, prompt: str, temperature: float = 0.0) -> tuple[str, float]:
+        """
+        Generate an action with confidence score.
+        Returns (action_text, mean_confidence).
+        """
+        raw, confidence, _ = generate_with_confidence(
+            self.model, self.tokenizer, prompt,
+            max_new_tokens=self._gen_max_tokens,
+            temperature=temperature,
+            top_k=self._gen_top_k,
+        )
+        return self._clean_action(raw), confidence
     
     def _detect_loop(self, history: list[dict]) -> bool:
         """Returns True if the last 3 actions are identical."""

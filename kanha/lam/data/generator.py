@@ -13,19 +13,20 @@ class TrajectoryGenerator:
         self.rng = random.Random(seed)
         self.reference_date = reference_date
         
-        if tier_weights is None:
-            self.tier_weights = {
-                'tier1': 0.20,
-                'tier2': 0.15,
-                'tier3': 0.20,
-                'tier4': 0.10,
-                'tier5': 0.10,
-                'tier6': 0.10,
-                'tier7': 0.10,
-                'tier8': 0.05
-            }
-        else:
+        if tier_weights is not None:
             self.tier_weights = tier_weights
+        else:
+            # Read from config, fall back to balanced defaults
+            try:
+                from kanha.utils.config import cfg
+                tw = cfg.lam.tier_weights
+                self.tier_weights = {k: getattr(tw, k) for k in dir(tw) if k.startswith('tier')}
+            except Exception:
+                self.tier_weights = {
+                    'tier1': 0.20, 'tier2': 0.15, 'tier3': 0.20,
+                    'tier4': 0.10, 'tier5': 0.10, 'tier6': 0.10,
+                    'tier7': 0.10, 'tier8': 0.05,
+                }
             
     def _sample_world(self, rng, min_size=0, max_size=12, require_titles=None) -> list[dict]:
         size = rng.randint(min_size, max_size)
@@ -77,7 +78,11 @@ class TrajectoryGenerator:
                         title = self.rng.choice(TITLE_POOL)
                         require_titles = [title, title]
                         
-                    world_tasks = self._sample_world(self.rng, require_titles=require_titles)
+                    world_tasks = self._sample_world(
+                        self.rng,
+                        min_size=TEMPLATES[tier][0].get('min_world_size', 0),
+                        require_titles=require_titles,
+                    )
                     for t in world_tasks:
                         store.add(title=t['title'], due=t['due'], prio=t['prio'], tag=t['tag'])
                         
@@ -105,7 +110,7 @@ class TrajectoryGenerator:
                         'world': world_tasks,
                         'steps': steps,
                         'tier': info['tier'],
-                        'template_id': f"{tier}_{info.get('solver', 'unknown')}_{i}",
+                        'template_id': f"{tier}_{info.get('goal', info.get('solver', 'unknown'))}",
                         'expected_state': env.get_state()
                     }
                     

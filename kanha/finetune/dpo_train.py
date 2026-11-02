@@ -56,7 +56,7 @@ def dpo_loss(
         policy_rejected_logps : log probs of rejected under current policy
         ref_chosen_logps      : log probs of chosen under reference model
         ref_rejected_logps    : log probs of rejected under reference model
-        beta                  : temperature parameter (lower = stronger preference)
+        beta                  : temperature parameter (higher = stronger preference signal / steeper policy update; lower = stronger regularization to reference model)
     """
     chosen_rewards = beta * (policy_chosen_logps - ref_chosen_logps)
     rejected_rewards = beta * (policy_rejected_logps - ref_rejected_logps)
@@ -103,7 +103,7 @@ def compute_log_probs(model, input_ids, labels, device):
     mask = (labels != -100).float()
     per_token_logps = per_token_logps * mask
 
-    # Sum log probs per sequence
+    # Sum log probs per sequence (standard DPO formulation: Rafailov et al. 2023)
     return per_token_logps.sum(dim=-1)
 
 
@@ -221,7 +221,21 @@ def dpo_train(args):
     tokenizer = KanhaTokenizer()
 
     # Dataset — use LAMDPODataset for lam-dpo, regular DPODataset for dpo
-    if getattr(args, "lam_mode", False):
+    lam_mode = getattr(args, "lam_mode", False)
+    if not lam_mode and os.path.exists(args.data):
+        try:
+            with open(args.data, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        first_obj = json.loads(line)
+                        if "goal" in first_obj or "### Goal" in first_obj.get("prompt", ""):
+                            lam_mode = True
+                        break
+        except Exception:
+            pass
+
+    if lam_mode:
         from kanha.lam.trajectory import LAMDPODataset
         dataset = LAMDPODataset(args.data, tokenizer, max_len=cfg.model.max_seq_len)
     else:
@@ -230,16 +244,20 @@ def dpo_train(args):
         dataset, batch_size=args.batch_size, shuffle=True, drop_last=True, num_workers=0
     )
 
-    # Optimizer — very low LR for DPO (1e-6 to 5e-6)
+    # Optimizer — very low LR for DPO
+    dpo_cfg = getattr(cfg, 'dpo', None)
+    dpo_weight_decay = getattr(dpo_cfg, 'weight_decay', 0.0) if dpo_cfg else 0.0
+    dpo_grad_clip = getattr(dpo_cfg, 'grad_clip', 1.0) if dpo_cfg else 1.0
+
     optimizer = torch.optim.AdamW(
         policy.parameters(),
         lr=args.lr,
-        weight_decay=0.0,
+        weight_decay=dpo_weight_decay,
         betas=(0.9, 0.95),
     )
 
     # DPO hyperparameters
-    beta = getattr(args, "beta", 0.1)
+    beta = getattr(args, "beta", getattr(dpo_cfg, 'beta', 0.1) if dpo_cfg else 0.1)
 
     ensure_dir(args.output)
 
@@ -276,7 +294,7 @@ def dpo_train(args):
             )
 
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(policy.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(policy.parameters(), dpo_grad_clip)
             optimizer.step()
             optimizer.zero_grad()
 
@@ -292,3 +310,18 @@ def dpo_train(args):
     save_path = os.path.join(args.output, "dpo_final.pt")
     policy.save_pretrained(save_path)
     log.info(f"DPO model saved to {save_path}")
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="DPO alignment training")
+    parser.add_argument("--base_model", required=True)
+    parser.add_argument("--data", required=True)
+    parser.add_argument("--output", default="models/finetuned/")
+    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--lr", type=float, default=1e-6)
+    parser.add_argument("--beta", type=float, default=0.1)
+    parser.add_argument("--lam_mode", action="store_true", help="Enable LAM DPO mode for agent trajectories")
+    cli_args = parser.parse_args()
+    dpo_train(cli_args)

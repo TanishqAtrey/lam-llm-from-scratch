@@ -5,6 +5,11 @@ Pre-training from scratch on tokenized text data.
 Expects a .npy file of token ids (created by scripts/preprocess_data.py).
 Trains a causal language model with next-token prediction.
 
+Features:
+  - Validation loss tracking (eval every N steps on held-out 10% split)
+  - Early stopping with configurable patience
+  - Saves best checkpoint by validation loss (not just latest)
+
 Run:
     python main.py train --data data/processed/train.npy
 """
@@ -27,21 +32,39 @@ class TokenDataset:
     """
     Memory-mapped dataset over a flat .npy token array.
     Returns fixed-length sequences for causal LM training.
+
+    Supports train/val splitting: pass split='train' or split='val'
+    with a val_fraction (default 0.1) to carve out a held-out set.
     """
 
-    def __init__(self, data_path: str, seq_len: int):
-        self.data = np.load(data_path, mmap_mode="r")
+    def __init__(self, data_path: str, seq_len: int,
+                 split: str = "all", val_fraction: float = 0.1):
+        full_data = np.load(data_path, mmap_mode="r")
         self.seq_len = seq_len
+
+        n_total = len(full_data)
+        val_size = int(n_total * val_fraction)
+
+        if split == "val":
+            self.data = full_data[:val_size]
+        elif split == "train":
+            self.data = full_data[val_size:]
+        else:
+            self.data = full_data
+
         self.n_tokens = len(self.data)
         self.n_sequences = self.n_tokens // (seq_len + 1)
-        log.info(f"Dataset: {self.n_tokens:,} tokens → {self.n_sequences:,} sequences")
+        log.info(f"Dataset [{split}]: {self.n_tokens:,} tokens → {self.n_sequences:,} sequences")
 
     def __len__(self):
         return self.n_sequences
 
     def get_batch(self, batch_size: int, device: torch.device):
         """Returns a random batch of (input_ids, targets)."""
-        indices = np.random.randint(0, self.n_tokens - self.seq_len - 1, size=batch_size)
+        max_start = self.n_tokens - self.seq_len - 1
+        if max_start <= 0:
+            raise ValueError(f"Dataset has too few tokens ({self.n_tokens}) for sequence length {self.seq_len}")
+        indices = np.random.randint(0, max_start, size=batch_size)
         x = np.stack([self.data[i:i + self.seq_len] for i in indices])
         y = np.stack([self.data[i + 1:i + self.seq_len + 1] for i in indices])
         return (
@@ -50,21 +73,67 @@ class TokenDataset:
         )
 
 
+@torch.no_grad()
+def _evaluate_val_loss(model, val_dataset, device, batch_size, n_eval_batches=20):
+    """
+    Computes average validation loss over n_eval_batches random batches.
+    Model is temporarily set to eval mode and restored after.
+    """
+    model.eval()
+    total_loss = 0.0
+    for _ in range(n_eval_batches):
+        input_ids, targets = val_dataset.get_batch(batch_size, device)
+        _, loss, _ = model(input_ids, targets=targets)
+        total_loss += loss.item()
+    model.train()
+    return total_loss / n_eval_batches
+
+
 def train(args):
     """
     Main pre-training loop. Called from main.py train command.
+
+    Includes validation loss tracking and early stopping:
+      --val_fraction  : fraction of data for validation (default 0.1)
+      --patience      : early-stop if val loss doesn't improve for N evals (default 5)
+      --eval_every    : evaluate val loss every N steps (default = save_every)
     """
     device = get_device()
     tc = cfg.training
     mc = cfg.model
 
-    # ── Dataset ──
-    dataset = TokenDataset(args.data, seq_len=mc.max_seq_len)
+    val_fraction = getattr(args, "val_fraction", None)
+    if val_fraction is None:
+        val_fraction = getattr(tc, "val_fraction", 0.1)
+    patience = getattr(args, "patience", None) or getattr(tc, "patience", 5)
+    eval_every = getattr(args, "eval_every", tc.save_every)
+
+    # ── Datasets (train / val split) ──
+    train_dataset = TokenDataset(args.data, seq_len=mc.max_seq_len,
+                                 split="train", val_fraction=val_fraction)
+    full_data = np.load(args.data, mmap_mode="r")
+    val_size = int(len(full_data) * val_fraction) if val_fraction else 0
+    if val_fraction > 0 and val_size > mc.max_seq_len + 1:
+        val_dataset = TokenDataset(args.data, seq_len=mc.max_seq_len,
+                                   split="val", val_fraction=val_fraction)
+    else:
+        val_dataset = None
+        if val_fraction > 0:
+            log.warning(
+                f"Validation split requested ({val_fraction}) but val_size ({val_size}) "
+                f"<= seq_len + 1 ({mc.max_seq_len + 1}). Disabling validation."
+            )
 
     # ── Model ──
+    start_step = 0
     if args.resume:
         log.info(f"Resuming from {args.resume}")
         model = KanhaModel.from_pretrained(args.resume)
+        import re
+        match = re.search(r"step(\d+)", os.path.basename(args.resume))
+        if match:
+            start_step = int(match.group(1))
+            log.info(f"Resuming training from step {start_step}")
     else:
         log.info("Initializing new model from config")
         model = KanhaModel()
@@ -74,10 +143,16 @@ def train(args):
     log.info(f"Parameters: {count_parameters(model):,}")
 
     # ── Optimizer ──
+    # Separate 2D matrix weights (decayed) from 1D biases and RMSNorm scales (non-decayed)
+    decay_params = [p for p in model.parameters() if p.requires_grad and p.dim() >= 2]
+    nodecay_params = [p for p in model.parameters() if p.requires_grad and p.dim() < 2]
+    optim_groups = [
+        {"params": decay_params, "weight_decay": tc.weight_decay},
+        {"params": nodecay_params, "weight_decay": 0.0},
+    ]
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        optim_groups,
         lr=tc.learning_rate,
-        weight_decay=tc.weight_decay,
         betas=(0.9, 0.95),
     )
 
@@ -86,16 +161,26 @@ def train(args):
         if step < tc.warmup_steps:
             return step / max(tc.warmup_steps, 1)
         progress = (step - tc.warmup_steps) / max(tc.max_steps - tc.warmup_steps, 1)
+        progress = min(1.0, max(0.0, progress))
         return 0.1 + 0.9 * (1 + math.cos(math.pi * progress)) / 2
 
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer, lr_lambda, last_epoch=start_step - 1 if start_step > 0 else -1
+    )
 
     # ── Training loop ──
     save_dir = cfg.paths.base_model
     ensure_dir(save_dir)
 
     running_loss = 0.0
-    pbar = tqdm(range(1, tc.max_steps + 1), desc="Pre-training")
+    best_val_loss = float("inf")
+    patience_counter = 0
+    pbar = tqdm(
+        range(start_step + 1, tc.max_steps + 1),
+        initial=start_step,
+        total=tc.max_steps,
+        desc="Pre-training",
+    )
 
     for step in pbar:
         # Gradient accumulation
@@ -103,7 +188,7 @@ def train(args):
         accum_loss = 0.0
 
         for micro_step in range(tc.grad_accum_steps):
-            input_ids, targets = dataset.get_batch(tc.batch_size, device)
+            input_ids, targets = train_dataset.get_batch(tc.batch_size, device)
             _, loss, _ = model(input_ids, targets=targets)
             loss = loss / tc.grad_accum_steps
             loss.backward()
@@ -126,7 +211,31 @@ def train(args):
             model.save_pretrained(ckpt_path)
             log.info(f"Checkpoint saved: {ckpt_path}")
 
+        # ── Validation + Early stopping ──
+        if val_dataset is not None and step % eval_every == 0:
+            val_loss = _evaluate_val_loss(
+                model, val_dataset, device, tc.batch_size
+            )
+            log.info(f"Step {step} | Val Loss: {val_loss:.4f} | Best: {best_val_loss:.4f}")
+
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                patience_counter = 0
+                best_path = os.path.join(save_dir, "best_model.pt")
+                model.save_pretrained(best_path)
+                log.info(f"New best model saved (val_loss={val_loss:.4f})")
+            else:
+                patience_counter += 1
+                log.info(f"No improvement ({patience_counter}/{patience})")
+                if patience_counter >= patience:
+                    log.info(
+                        f"Early stopping at step {step} — val loss has not "
+                        f"improved for {patience} evals. Best: {best_val_loss:.4f}"
+                    )
+                    break
+
     # Final save
     final_path = os.path.join(save_dir, "final_model.pt")
     model.save_pretrained(final_path)
     log.info(f"Training complete! Model saved to {final_path}")
+    log.info(f"Best validation loss: {best_val_loss:.4f} (saved to {save_dir}/best_model.pt)")

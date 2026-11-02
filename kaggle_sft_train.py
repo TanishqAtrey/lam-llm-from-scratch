@@ -142,6 +142,8 @@ args = SimpleNamespace(
     epochs=2,          # 2 epochs is safe for a 40-60M model
     batch_size=4,      # increase to 8 if GPU memory allows
     lr=3e-5,           # safe learning rate
+    val_fraction=0.1,  # 10% held-out for validation
+    patience=3,        # early stop after 3 epochs without val improvement
 )
 
 sft_train(args)

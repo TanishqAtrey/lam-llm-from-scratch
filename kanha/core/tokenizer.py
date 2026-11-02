@@ -72,8 +72,12 @@ class KanhaTokenizer:
         if add_eos:
             ids = ids + [self.EOS_ID]
 
-        if max_length is not None:
-            ids = ids[:max_length]
+        if max_length is not None and len(ids) > max_length:
+            # Preserve EOS if it was added — truncate content, not the end marker
+            if add_eos:
+                ids = ids[:max_length - 1] + [self.EOS_ID]
+            else:
+                ids = ids[:max_length]
 
         return ids
 

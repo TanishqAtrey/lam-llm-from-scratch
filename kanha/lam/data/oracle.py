@@ -106,14 +106,26 @@ class Oracle:
         obs1, _ = env.step(act1)
 
         # Extract task ID
-        m = re.search(r"#(\d+)", obs1)
-        if not m:
+        target_id = info.get("target_id")
+        task_id = None
+        if target_id is not None and f"#{target_id} " in obs1:
+            task_id = str(target_id)
+        else:
+            target_title = info.get("query_val", query)
+            if target_title:
+                m = re.search(rf"#(\d+)\s+.*{re.escape(target_title)}", obs1, re.IGNORECASE)
+                if m:
+                    task_id = m.group(1)
+        if not task_id:
+            m = re.search(r"#(\d+)", obs1)
+            if m:
+                task_id = m.group(1)
+
+        if not task_id:
             finish = 'finish(msg="Could not find the task.")'
             obs_f, _ = env.step(finish)
             return [(act1, obs1), (finish, obs_f)]
-
-        task_id = m.group(1)
-        goal = info.get("goal_text", "").lower()
+        goal = (info.get("goal") or info.get("goal_text", "")).lower()
 
         # Step 2: determine the action based on goal intent
         if "move" in goal or "reschedule" in goal:
@@ -155,7 +167,7 @@ class Oracle:
         if "tag" in slots:
             parts.append(f"tag={slots['tag']}")
 
-        goal = info.get("goal_text", "").lower()
+        goal = (info.get("goal") or info.get("goal_text", "")).lower()
         if "delete" in goal and ("completed" in goal or "done" in goal):
             action = "delete_done()"
         else:
@@ -209,23 +221,28 @@ class Oracle:
 
     def _solve_error_recovery(self, info, env):
         slots = info.get("slot_values", {})
-        goal = info.get("goal_text", "").lower()
+        goal = (info.get("goal") or info.get("goal_text", "")).lower()
 
-        # Goals with explicit bad IDs (99, 88, 77, 999)
-        m_id = re.search(r"\d+", goal)
-        if m_id:
-            tid = m_id.group(0)
-            if int(tid) > 50:  # likely a bad ID
-                if "done" in goal or "complete" in goal or "mark" in goal:
-                    act1 = f"done(id={tid})"
-                elif "delete" in goal or "remove" in goal:
-                    act1 = f"delete(id={tid})"
-                else:
-                    act1 = f"edit(id={tid}, field=title, value=new)"
-                obs1, _ = env.step(act1)
-                finish = 'finish(msg="Could not find that task.")'
-                obs_f, _ = env.step(finish)
-                return [(act1, obs1), (finish, obs_f)]
+        # Goals with explicit bad IDs (e.g. task 99, 88, 77, 999) - only if no query slot
+        if "query" not in slots:
+            m_id = re.search(r"\b(?:task\s+|#|of\s+)?(\d+)\b", goal)
+            if m_id:
+                tid = m_id.group(1)
+                if int(tid) > 50:  # likely a bad ID
+                    if "done" in goal or "complete" in goal or "mark" in goal:
+                        act1 = f"done(id={tid})"
+                    elif "delete" in goal or "remove" in goal:
+                        act1 = f"delete(id={tid})"
+                    elif "priority" in goal or "change" in goal:
+                        act1 = f"edit(id={tid}, field=priority, value=high)"
+                    elif "tag" in goal:
+                        act1 = f"edit(id={tid}, field=tag, value=work)"
+                    else:
+                        act1 = f"edit(id={tid}, field=title, value=new)"
+                    obs1, _ = env.step(act1)
+                    finish = 'finish(msg="Could not find that task.")'
+                    obs_f, _ = env.step(finish)
+                    return [(act1, obs1), (finish, obs_f)]
 
         # Goals with query that won't match
         query = slots.get("query", "missing_task_xyz")

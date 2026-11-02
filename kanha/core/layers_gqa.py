@@ -81,40 +81,47 @@ class GroupedQueryAttention(nn.Module):
         self,
         x: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
+        use_cache: bool = False,
         kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-    ) -> Tuple[torch.Tensor, Tuple]:
+    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         B, S, D = x.shape
 
         q = self.q_proj(x).view(B, S, self.n_heads,    self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, S, self.n_kv_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, S, self.n_kv_heads, self.head_dim).transpose(1, 2)
 
-        # Apply RoPE to Q and K — FIX: pass offset for correct KV-cache positional encoding
+        # Apply RoPE to Q and K — pass offset for correct KV-cache positional encoding
         offset = kv_cache[0].shape[2] if kv_cache is not None else 0
         cos, sin = self.rope(S, offset=offset)
         q, k = apply_rope(q, k, cos, sin)
 
-        # KV cache concatenation
+        # KV cache concatenation (compact KV heads)
         if kv_cache is not None:
             k_cache, v_cache = kv_cache
             k = torch.cat([k_cache, k], dim=2)
             v = torch.cat([v_cache, v], dim=2)
-        new_kv_cache = (k, v)
+        new_kv_cache = (k, v) if use_cache else None
 
         # Expand KV to match query heads
-        k = self._repeat_kv(k)   # (B, n_heads, S_full, head_dim)
-        v = self._repeat_kv(v)
+        k_rep = self._repeat_kv(k)   # (B, n_heads, S_full, head_dim)
+        v_rep = self._repeat_kv(v)
 
         # Scaled dot-product attention
-        attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        attn = torch.matmul(q, k_rep.transpose(-2, -1)) * self.scale
 
         if mask is not None:
             attn = attn + mask
+        elif S > 1:
+            causal_mask = torch.triu(
+                torch.full((S, k_rep.shape[2]), float('-inf'), device=x.device, dtype=attn.dtype),
+                diagonal=k_rep.shape[2] - S + 1,
+            )
+            attn = attn + causal_mask
 
         attn = F.softmax(attn, dim=-1)
         attn = self.dropout(attn)
 
-        out = torch.matmul(attn, v)
+        out = torch.matmul(attn, v_rep)
         out = out.transpose(1, 2).contiguous().view(B, S, -1)
         out = self.out_proj(out)
         return out, new_kv_cache
@@ -133,8 +140,8 @@ class TransformerBlockGQA(nn.Module):
         self.norm2 = RMSNorm(dim)
         self.ffn   = FeedForward(dim, ff_dim, dropout)
 
-    def forward(self, x, mask=None, kv_cache=None):
-        attn_out, new_cache = self.attn(self.norm1(x), mask=mask, kv_cache=kv_cache)
+    def forward(self, x, mask=None, use_cache=False, kv_cache=None):
+        attn_out, new_cache = self.attn(self.norm1(x), mask=mask, use_cache=use_cache, kv_cache=kv_cache)
         x = x + attn_out
         x = x + self.ffn(self.norm2(x))
         return x, new_cache

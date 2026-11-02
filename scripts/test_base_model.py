@@ -20,6 +20,8 @@ from kanha.core.tokenizer import KanhaTokenizer
 from kanha.core.generation import generate
 from kanha.utils.helpers import get_device
 
+__test__ = False  # Prevent pytest from treating this CLI test script as a test suite item
+
 
 def test_base_model(model_path, tokenizer_path=None):
     print(f"\n{'='*60}")

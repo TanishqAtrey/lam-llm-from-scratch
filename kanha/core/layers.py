@@ -101,6 +101,7 @@ class MultiHeadAttention(nn.Module):
         x: torch.Tensor,
         use_cache: bool = False,
         kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        offset: Optional[int] = None,
     ) -> Tuple[torch.Tensor, Optional[Tuple]]:
         B, S, D = x.shape
 
@@ -108,9 +109,9 @@ class MultiHeadAttention(nn.Module):
         k = self.k_proj(x).view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, S, self.n_heads, self.head_dim).transpose(1, 2)
 
-        # RoPE — offset by cached context length during inference
-        offset = kv_cache[0].shape[2] if kv_cache is not None else 0
-        cos, sin = self.rope(S, offset=offset)
+        # RoPE — offset by cumulative position or cached context length during inference
+        actual_offset = offset if offset is not None else (kv_cache[0].shape[2] if kv_cache is not None else 0)
+        cos, sin = self.rope(S, offset=actual_offset)
         q, k = apply_rope(q, k, cos, sin)
 
         # KV cache append (inference only — skipped entirely during training)
@@ -137,7 +138,8 @@ class MultiHeadAttention(nn.Module):
             if S > 1:
                 row_idx = torch.arange(S, device=x.device).unsqueeze(1)
                 col_idx = torch.arange(k.shape[2], device=x.device).unsqueeze(0)
-                attn_mask = col_idx <= (row_idx + offset)
+                past_len = k.shape[2] - S
+                attn_mask = col_idx <= (row_idx + past_len)
 
         # MPS backend may fail silently with dropout_p > 0 in SDPA
         dropout_p = self.dropout if self.training and x.device.type != 'mps' else 0.0
@@ -175,8 +177,8 @@ class TransformerBlock(nn.Module):
         self.norm2 = RMSNorm(dim)
         self.ffn   = FeedForward(dim, ff_dim, dropout)
 
-    def forward(self, x, use_cache=False, kv_cache=None):
-        attn_out, new_cache = self.attn(self.norm1(x), use_cache=use_cache, kv_cache=kv_cache)
+    def forward(self, x, use_cache=False, kv_cache=None, offset: Optional[int] = None):
+        attn_out, new_cache = self.attn(self.norm1(x), use_cache=use_cache, kv_cache=kv_cache, offset=offset)
         x = x + attn_out
         x = x + self.ffn(self.norm2(x))
         return x, new_cache

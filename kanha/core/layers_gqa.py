@@ -85,6 +85,7 @@ class GroupedQueryAttention(nn.Module):
         mask: Optional[torch.Tensor] = None,
         use_cache: bool = False,
         kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        offset: Optional[int] = None,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         B, S, D = x.shape
 
@@ -93,8 +94,8 @@ class GroupedQueryAttention(nn.Module):
         v = self.v_proj(x).view(B, S, self.n_kv_heads, self.head_dim).transpose(1, 2)
 
         # Apply RoPE to Q and K — pass offset for correct KV-cache positional encoding
-        offset = kv_cache[0].shape[2] if kv_cache is not None else 0
-        cos, sin = self.rope(S, offset=offset)
+        actual_offset = offset if offset is not None else (kv_cache[0].shape[2] if kv_cache is not None else 0)
+        cos, sin = self.rope(S, offset=actual_offset)
         q, k = apply_rope(q, k, cos, sin)
 
         # KV cache concatenation (compact KV heads)
@@ -123,7 +124,8 @@ class GroupedQueryAttention(nn.Module):
                 if S > 1:
                     row_idx = torch.arange(S, device=x.device).unsqueeze(1)
                     col_idx = torch.arange(k_rep.shape[2], device=x.device).unsqueeze(0)
-                    attn_mask = col_idx <= (row_idx + offset)
+                    past_len = k_rep.shape[2] - S
+                    attn_mask = col_idx <= (row_idx + past_len)
         else:
             is_causal = False
 
@@ -154,8 +156,8 @@ class TransformerBlockGQA(nn.Module):
         self.norm2 = RMSNorm(dim)
         self.ffn   = FeedForward(dim, ff_dim, dropout)
 
-    def forward(self, x, mask=None, use_cache=False, kv_cache=None):
-        attn_out, new_cache = self.attn(self.norm1(x), mask=mask, use_cache=use_cache, kv_cache=kv_cache)
+    def forward(self, x, mask=None, use_cache=False, kv_cache=None, offset: Optional[int] = None):
+        attn_out, new_cache = self.attn(self.norm1(x), mask=mask, use_cache=use_cache, kv_cache=kv_cache, offset=offset)
         x = x + attn_out
         x = x + self.ffn(self.norm2(x))
         return x, new_cache

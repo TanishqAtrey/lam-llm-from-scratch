@@ -96,12 +96,14 @@ class KanhaModel(nn.Module):
         input_ids: torch.Tensor,
         targets: Optional[torch.Tensor] = None,
         kv_caches: Optional[List[Tuple]] = None,
+        offset: Optional[int] = None,
     ):
         """
         Args:
             input_ids : (B, S)
             targets   : (B, S) for training loss
             kv_caches : per-layer KV caches — only pass during inference
+            offset    : cumulative sequence position for RoPE during autoregressive inference
 
         Returns:
             logits    : (B, S, vocab_size)
@@ -116,7 +118,7 @@ class KanhaModel(nn.Module):
 
         for i, layer in enumerate(self.layers):
             cache_i = kv_caches[i] if use_cache else None
-            x, new_cache = layer(x, use_cache=use_cache, kv_cache=cache_i)
+            x, new_cache = layer(x, use_cache=use_cache, kv_cache=cache_i, offset=offset)
             new_caches.append(new_cache)   # None during training — no allocation
 
         x      = self.norm(x)

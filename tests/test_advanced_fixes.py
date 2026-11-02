@@ -326,3 +326,86 @@ def test_check_lengths_script(tmp_path):
     assert "Total samples: 2" in res.stdout
     assert "<= 256 tokens: 2" in res.stdout
 
+
+# ── 8. Repetition Penalty Deduplication Test ──────────────────────────────────
+
+def test_repetition_penalty_deduplication():
+    """Verify apply_repetition_penalty deduplicates tokens and correctly scales logits."""
+    from kanha.core.generation import apply_repetition_penalty
+
+    # 2D case with duplicate tokens
+    logits = torch.tensor([[1.0, 2.0, -3.0, 4.0]])
+    ctx = torch.tensor([[0, 2, 0, 2]])  # duplicate 0 and 2
+    penalty = 1.2
+    penalized = apply_repetition_penalty(logits, ctx, penalty)
+
+    assert torch.isclose(penalized[0, 0], torch.tensor(1.0 / penalty))
+    assert torch.isclose(penalized[0, 2], torch.tensor(-3.0 * penalty))
+    assert torch.isclose(penalized[0, 1], torch.tensor(2.0))
+    assert torch.isclose(penalized[0, 3], torch.tensor(4.0))
+
+    # 1D case
+    logits_1d = torch.tensor([1.0, 2.0, -3.0, 4.0])
+    penalized_1d = apply_repetition_penalty(logits_1d, ctx, penalty)
+    assert torch.isclose(penalized_1d[0], torch.tensor(1.0 / penalty))
+    assert torch.isclose(penalized_1d[2], torch.tensor(-3.0 * penalty))
+
+
+# ── 9. RoPE Offset Advancement Across Rolling KV-Cache ────────────────────────
+
+def test_rope_offset_advancement_across_rolling_kv():
+    """Verify RoPE positional encoding continues advancing monotonically past max_seq_len."""
+    from kanha.core.model import KanhaModel
+    from kanha.core.generation import generate
+    from unittest.mock import MagicMock
+
+    max_len = 16
+    model = KanhaModel(
+        vocab_size=100,
+        dim=32,
+        n_layers=2,
+        n_heads=2,
+        ff_dim=64,
+        max_seq_len=max_len,
+    )
+    model.eval()
+
+    captured_offsets = []
+    # Intercept RotaryEmbedding.forward to record offsets
+    orig_rope_forward = model.layers[0].attn.rope.forward
+
+    def intercept_rope(seq_len: int, offset: int = 0):
+        captured_offsets.append(offset)
+        return orig_rope_forward(seq_len, offset=offset)
+
+    model.layers[0].attn.rope.forward = intercept_rope
+
+    mock_tok = MagicMock()
+    mock_tok.EOS_ID = 99
+    # Prompt of 4 tokens
+    mock_tok.encode.return_value = [1, 2, 3, 4]
+    mock_tok.decode.side_effect = lambda ids, **kwargs: " ".join(str(i) for i in ids)
+
+    # Generate 25 tokens (total length = 29 > max_seq_len 16)
+    _ = generate(
+        model=model,
+        tokenizer=mock_tok,
+        prompt="dummy prompt",
+        max_new_tokens=25,
+        temperature=0.0,
+        stop_tokens=[9999],  # Don't stop early
+        device=torch.device("cpu"),
+    )
+
+    # First call is prefill at offset 0
+    assert captured_offsets[0] == 0
+    # Next call is first generated token at offset 4 (prompt length)
+    assert captured_offsets[1] == 4
+    # Subsequent calls must increment monotonically by 1 each step
+    for step, off in enumerate(captured_offsets[1:]):
+        assert off == 4 + step, f"Offset at step {step} was {off}, expected {4 + step}"
+
+    # Verify that the offset exceeded max_seq_len (16) without freezing at 16
+    assert max(captured_offsets) >= 27, f"Max offset was {max(captured_offsets)}, should reach 27"
+
+

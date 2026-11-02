@@ -22,7 +22,7 @@ def main():
         print("Error: sentencepiece is required. Run: pip install sentencepiece", file=sys.stderr)
         sys.exit(1)
 
-    tok = KanhaTokenizer(model_file=args.tokenizer) if args.tokenizer else KanhaTokenizer()
+    tok = KanhaTokenizer(model_path=args.tokenizer) if args.tokenizer else KanhaTokenizer()
     lengths = []
 
     with open(args.data, "r", encoding="utf-8") as f:

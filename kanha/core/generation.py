@@ -55,9 +55,23 @@ def apply_repetition_penalty(
     if penalty == 1.0:
         return logits
     logits = logits.clone()
-    score = torch.gather(logits, 1, input_ids)
-    score = torch.where(score < 0, score * penalty, score / penalty)
-    logits.scatter_(1, input_ids, score)
+    if logits.ndim > 1:
+        if logits.shape[0] == 1:
+            unique_tokens = torch.unique(input_ids).unsqueeze(0)
+            score = torch.gather(logits, 1, unique_tokens)
+            score = torch.where(score < 0, score * penalty, score / penalty)
+            logits.scatter_(1, unique_tokens, score)
+        else:
+            for b in range(logits.shape[0]):
+                b_unique = torch.unique(input_ids[b]).unsqueeze(0)
+                b_score = torch.gather(logits[b:b+1], 1, b_unique)
+                b_score = torch.where(b_score < 0, b_score * penalty, b_score / penalty)
+                logits[b:b+1].scatter_(1, b_unique, b_score)
+    else:
+        unique_tokens = torch.unique(input_ids)
+        score = torch.gather(logits, 0, unique_tokens)
+        score = torch.where(score < 0, score * penalty, score / penalty)
+        logits.scatter_(0, unique_tokens, score)
     return logits
 
 
@@ -149,9 +163,11 @@ def generate(
     # the very first pass → prompt K/V are never stored → from token 2 onwards
     # the model has zero context and generates garbage.
     kv_caches = [None] * model.n_layers
+    cur_pos = 0
 
     for _ in range(max_new_tokens):
-        logits, _, kv_caches = model(input_tensor, kv_caches=kv_caches)
+        logits, _, kv_caches = model(input_tensor, kv_caches=kv_caches, offset=cur_pos)
+        cur_pos += input_tensor.shape[1]
 
         # Repetition penalty over full context
         if repetition_penalty != 1.0:
@@ -230,9 +246,11 @@ def generate_with_confidence(
     generated = list(input_ids)
     kv_caches = [None] * model.n_layers
     per_token_confs: list[float] = []
+    cur_pos = 0
 
     for _ in range(max_new_tokens):
-        logits, _, kv_caches = model(input_tensor, kv_caches=kv_caches)
+        logits, _, kv_caches = model(input_tensor, kv_caches=kv_caches, offset=cur_pos)
+        cur_pos += input_tensor.shape[1]
 
         # Compute true model probabilities before heuristic distortion
         raw_last_logits = logits[:, -1, :].clone()
@@ -316,13 +334,15 @@ def generate_stream(
     input_tensor = torch.tensor([input_ids], dtype=torch.long, device=device)
     kv_caches = [None] * model.n_layers
     generated = list(input_ids)
+    cur_pos = 0
 
     # For incremental decode: track all NEW token ids and previous decoded text
     new_ids = []
     prev_text = ""
 
     for _ in range(max_new_tokens):
-        logits, _, kv_caches = model(input_tensor, kv_caches=kv_caches)
+        logits, _, kv_caches = model(input_tensor, kv_caches=kv_caches, offset=cur_pos)
+        cur_pos += input_tensor.shape[1]
 
         if repetition_penalty != 1.0:
             ctx = torch.tensor([generated], dtype=torch.long, device=device)

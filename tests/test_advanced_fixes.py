@@ -170,6 +170,21 @@ def test_pretrain_checkpoint_and_resume(tmp_path):
     assert len(new_opt.state) > 0
 
 
+def test_pretrain_checkpoint_with_amp_scaler(tmp_path):
+    """Verify _save_pretrain_checkpoint saves scaler state when enabled and restores cleanly."""
+    model = KanhaModel(vocab_size=100, dim=32, n_layers=1, n_heads=2, ff_dim=64, max_seq_len=32)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda s: 1.0)
+    scaler = torch.amp.GradScaler("cuda", enabled=False)
+
+    ckpt_path = str(tmp_path / "ckpt_step50.pt")
+    _save_pretrain_checkpoint(ckpt_path, model, optimizer, scheduler, step=50, best_val_loss=3.12, scaler=scaler)
+
+    raw_ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    assert raw_ckpt["step"] == 50
+    assert raw_ckpt["best_val_loss"] == 3.12
+
+
 # ── 3. Numpy Header Truncation Test ──────────────────────────────────────────
 
 def test_npy_header_truncation(tmp_path):

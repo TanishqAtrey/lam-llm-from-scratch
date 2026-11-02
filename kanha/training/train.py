@@ -74,7 +74,7 @@ class TokenDataset:
 
 
 @torch.no_grad()
-def _evaluate_val_loss(model, val_dataset, device, batch_size, n_eval_batches=20):
+def _evaluate_val_loss(model, val_dataset, device, batch_size, n_eval_batches=20, use_amp=False):
     """
     Computes average validation loss over n_eval_batches random batches.
     Model is temporarily set to eval mode and restored after.
@@ -83,13 +83,14 @@ def _evaluate_val_loss(model, val_dataset, device, batch_size, n_eval_batches=20
     total_loss = 0.0
     for _ in range(n_eval_batches):
         input_ids, targets = val_dataset.get_batch(batch_size, device)
-        _, loss, _ = model(input_ids, targets=targets)
+        with torch.amp.autocast(device_type="cuda" if use_amp else "cpu", dtype=torch.float16 if use_amp else torch.float32, enabled=use_amp):
+            _, loss, _ = model(input_ids, targets=targets)
         total_loss += loss.item()
     model.train()
     return total_loss / n_eval_batches
 
 
-def _save_pretrain_checkpoint(path: str, model: KanhaModel, optimizer, scheduler, step: int, best_val_loss: float):
+def _save_pretrain_checkpoint(path: str, model: KanhaModel, optimizer, scheduler, step: int, best_val_loss: float, scaler=None):
     cfg_dict = {
         "vocab_size":  model.vocab_size,
         "dim":         model.dim,
@@ -112,6 +113,8 @@ def _save_pretrain_checkpoint(path: str, model: KanhaModel, optimizer, scheduler
         "torch_rng_state": torch.get_rng_state(),
         "numpy_rng_state": np.random.get_state(),
     }
+    if scaler is not None and getattr(scaler, "is_enabled", lambda: False)():
+        ckpt_data["scaler_state"] = scaler.state_dict()
     if torch.cuda.is_available():
         ckpt_data["cuda_rng_state"] = torch.cuda.get_rng_state_all()
 
@@ -203,6 +206,11 @@ def train(args):
         optimizer, lr_lambda, last_epoch=start_step - 1 if start_step > 0 else -1
     )
 
+    use_amp = (device.type == "cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    if use_amp:
+        log.info("AMP FP16 Mixed Precision enabled (T4 Tensor Cores active)")
+
     best_val_loss = float("inf")
     # Restore optimizer and scheduler states if present in checkpoint
     if raw_ckpt is not None:
@@ -218,6 +226,12 @@ def train(args):
                 log.info("Restored learning rate scheduler state")
             except Exception as e:
                 log.warning(f"Could not restore scheduler state: {e}")
+        if "scaler_state" in raw_ckpt and scaler is not None and getattr(scaler, "is_enabled", lambda: False)():
+            try:
+                scaler.load_state_dict(raw_ckpt["scaler_state"])
+                log.info("Restored AMP GradScaler state")
+            except Exception as e:
+                log.warning(f"Could not restore GradScaler state: {e}")
         if "best_val_loss" in raw_ckpt:
             best_val_loss = raw_ckpt["best_val_loss"]
         if "torch_rng_state" in raw_ckpt:
@@ -254,18 +268,21 @@ def train(args):
 
     for step in pbar:
         # Gradient accumulation
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         accum_loss = 0.0
 
         for micro_step in range(tc.grad_accum_steps):
             input_ids, targets = train_dataset.get_batch(tc.batch_size, device)
-            _, loss, _ = model(input_ids, targets=targets)
-            loss = loss / tc.grad_accum_steps
-            loss.backward()
+            with torch.amp.autocast(device_type="cuda" if use_amp else "cpu", dtype=torch.float16 if use_amp else torch.float32, enabled=use_amp):
+                _, loss, _ = model(input_ids, targets=targets)
+                loss = loss / tc.grad_accum_steps
+            scaler.scale(loss).backward()
             accum_loss += loss.item()
 
+        scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), tc.grad_clip)
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
         scheduler.step()
 
         running_loss += accum_loss
@@ -278,12 +295,12 @@ def train(args):
 
         if step % tc.save_every == 0:
             ckpt_path = os.path.join(save_dir, f"ckpt_step{step}.pt")
-            _save_pretrain_checkpoint(ckpt_path, model, optimizer, scheduler, step, best_val_loss)
+            _save_pretrain_checkpoint(ckpt_path, model, optimizer, scheduler, step, best_val_loss, scaler=scaler)
 
         # ── Validation + Early stopping ──
         if val_dataset is not None and eval_every and step % eval_every == 0:
             val_loss = _evaluate_val_loss(
-                model, val_dataset, device, tc.batch_size
+                model, val_dataset, device, tc.batch_size, use_amp=use_amp
             )
             log.info(f"Step {step} | Val Loss: {val_loss:.4f} | Best: {best_val_loss:.4f}")
 
@@ -291,7 +308,7 @@ def train(args):
                 best_val_loss = val_loss
                 patience_counter = 0
                 best_path = os.path.join(save_dir, "best_model.pt")
-                _save_pretrain_checkpoint(best_path, model, optimizer, scheduler, step, best_val_loss)
+                _save_pretrain_checkpoint(best_path, model, optimizer, scheduler, step, best_val_loss, scaler=scaler)
                 log.info(f"New best model saved (val_loss={val_loss:.4f})")
             else:
                 patience_counter += 1
@@ -306,6 +323,6 @@ def train(args):
     # Final save
     final_path = os.path.join(save_dir, "final_model.pt")
     final_step = step if "step" in locals() else tc.max_steps
-    _save_pretrain_checkpoint(final_path, model, optimizer, scheduler, final_step, best_val_loss)
+    _save_pretrain_checkpoint(final_path, model, optimizer, scheduler, final_step, best_val_loss, scaler=scaler)
     log.info(f"Training complete! Model saved to {final_path}")
     log.info(f"Best validation loss: {best_val_loss:.4f} (saved to {save_dir}/best_model.pt)")

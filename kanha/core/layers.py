@@ -42,11 +42,11 @@ class RotaryEmbedding(nn.Module):
 
     def _build_cache(self, seq_len: int):
         self.max_seq_len = max(seq_len, getattr(self, "max_seq_len", seq_len))
-        t     = torch.arange(self.max_seq_len, device=self.inv_freq.device).float()
+        t     = torch.arange(self.max_seq_len, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
         freqs = torch.outer(t, self.inv_freq)
         emb   = torch.cat([freqs, freqs], dim=-1)
-        self.register_buffer("cos_cached", emb.cos(), persistent=False)
-        self.register_buffer("sin_cached", emb.sin(), persistent=False)
+        self.register_buffer("cos_cached", emb.cos().to(self.inv_freq.dtype), persistent=False)
+        self.register_buffer("sin_cached", emb.sin().to(self.inv_freq.dtype), persistent=False)
 
     def forward(self, seq_len: int, offset: int = 0):
         if offset + seq_len > self.max_seq_len:
@@ -63,6 +63,8 @@ def rotate_half(x: torch.Tensor) -> torch.Tensor:
 
 
 def apply_rope(q, k, cos, sin):
+    cos = cos.to(q.dtype)
+    sin = sin.to(q.dtype)
     q_out = (q * cos) + (rotate_half(q) * sin)
     k_out = (k * cos) + (rotate_half(k) * sin)
     return q_out.to(q.dtype), k_out.to(k.dtype)
@@ -80,18 +82,19 @@ class MultiHeadAttention(nn.Module):
 
     use_cache=True only during inference — training never builds the cache.
     """
-    def __init__(self, dim: int, n_heads: int, dropout: float = 0.0):
+    def __init__(self, dim: int, n_heads: int, dropout: float = 0.0, max_seq_len: int = 4096):
         super().__init__()
         assert dim % n_heads == 0
-        self.n_heads  = n_heads
-        self.head_dim = dim // n_heads
-        self.dropout  = dropout
+        self.n_heads     = n_heads
+        self.head_dim    = dim // n_heads
+        self.dropout     = dropout
+        self.max_seq_len = max_seq_len
 
         self.q_proj   = nn.Linear(dim, dim, bias=False)
         self.k_proj   = nn.Linear(dim, dim, bias=False)
         self.v_proj   = nn.Linear(dim, dim, bias=False)
         self.out_proj = nn.Linear(dim, dim, bias=False)
-        self.rope     = RotaryEmbedding(self.head_dim)
+        self.rope     = RotaryEmbedding(self.head_dim, max_seq_len=max_seq_len)
 
     def forward(
         self,
@@ -116,6 +119,9 @@ class MultiHeadAttention(nn.Module):
             if kv_cache is not None:
                 k = torch.cat([kv_cache[0], k], dim=2)
                 v = torch.cat([kv_cache[1], v], dim=2)
+            if k.shape[2] > self.max_seq_len:
+                k = k[:, :, -self.max_seq_len:, :]
+                v = v[:, :, -self.max_seq_len:, :]
             new_cache = (k, v)
 
         # ── SDPA: single fused kernel — no manual mask, no manual matmuls ──
@@ -162,10 +168,10 @@ class FeedForward(nn.Module):
 
 # ─── 5. Transformer Block ─────────────────────────────────────────────────────
 class TransformerBlock(nn.Module):
-    def __init__(self, dim: int, n_heads: int, ff_dim: int, dropout: float = 0.0):
+    def __init__(self, dim: int, n_heads: int, ff_dim: int, dropout: float = 0.0, max_seq_len: int = 4096):
         super().__init__()
         self.norm1 = RMSNorm(dim)
-        self.attn  = MultiHeadAttention(dim, n_heads, dropout)
+        self.attn  = MultiHeadAttention(dim, n_heads, dropout, max_seq_len=max_seq_len)
         self.norm2 = RMSNorm(dim)
         self.ffn   = FeedForward(dim, ff_dim, dropout)
 

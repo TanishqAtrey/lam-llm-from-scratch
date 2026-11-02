@@ -62,6 +62,10 @@ class LAMDPODataset(Dataset):
         # Mask prompt tokens
         for i in range(min(mask_len - 1, len(labels))):
             labels[i] = -100
+
+        # Safety guard: ensure at least one supervised token remains
+        if not any(l != -100 for l in labels) and len(labels) > 0:
+            labels[-1] = full_ids[-1]
             
         # Pad/truncate to max_len - 1
         seq_len = self.max_len - 1
@@ -78,7 +82,9 @@ class LAMDPODataset(Dataset):
 
     def __getitem__(self, idx):
         ex = self.examples[idx]
-        prompt = ex['prompt']
+        prompt = ex.get('prompt')
+        if not prompt and 'goal' in ex:
+            prompt = format_step_prompt(ex.get('goal', ''), ex.get('history', []))
         chosen = ex['chosen']
         rejected = ex['rejected']
         

@@ -100,12 +100,8 @@ pip install -r requirements.txt
 ### 2. Train the base model
 
 ```bash
-# Train tokenizer
-python main.py train-tokenizer --data data/raw/
-
-# Download and preprocess data
-python scripts/download_datasets.py
-python scripts/preprocess_data.py
+# Stream 3B tokens and tokenize directly (auto-bootstraps tokenizer if needed)
+python scripts/prepare_3b_tokens.py --tokenizer models/tokenizer/tokenizer.model --output data/processed/train.npy
 
 # Pretrain
 python main.py pretrain --data data/processed/train.npy
@@ -120,8 +116,8 @@ python main.py dpo --base_model models/finetuned/sft_final.pt --data data/proces
 ### 3. Train the LAM
 
 ```bash
-# Generate synthetic training data (100k trajectories)
-python main.py lam-generate --output data/lam/trajectories.jsonl --num 100000
+# Generate synthetic training data (100k trajectories) and split into train/val/test
+python main.py lam-generate --output data/lam/trajectories.jsonl --num 100000 --split
 
 # SFT on action sequences
 python main.py lam-train --data data/lam/train.jsonl --output models/lam/
@@ -250,11 +246,12 @@ All hyperparameters live in `config.yaml`:
 
 ```yaml
 model:
-  d_model: 512
+  vocab_size: 16000
+  dim: 512
   n_heads: 8
   n_layers: 8
-  d_ff: 2048
-  max_seq_len: 512
+  ff_dim: 2048
+  max_seq_len: 1024
   dropout: 0.1
 
 training:

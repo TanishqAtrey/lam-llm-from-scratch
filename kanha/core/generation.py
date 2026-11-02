@@ -24,7 +24,7 @@ log = get_logger(__name__)
 
 def top_k_filter(logits: torch.Tensor, k: int) -> torch.Tensor:
     """Zeros out all logits except the top-k."""
-    if k == 0:
+    if k <= 0 or k >= logits.shape[-1]:
         return logits
     values, _ = torch.topk(logits, k)
     threshold = values[..., -1, None]
@@ -54,6 +54,7 @@ def apply_repetition_penalty(
     """Penalizes tokens that already appear in the context."""
     if penalty == 1.0:
         return logits
+    logits = logits.clone()
     score = torch.gather(logits, 1, input_ids)
     score = torch.where(score < 0, score * penalty, score / penalty)
     logits.scatter_(1, input_ids, score)
@@ -233,6 +234,10 @@ def generate_with_confidence(
     for _ in range(max_new_tokens):
         logits, _, kv_caches = model(input_tensor, kv_caches=kv_caches)
 
+        # Compute true model probabilities before heuristic distortion
+        raw_last_logits = logits[:, -1, :].clone()
+        raw_probs = F.softmax(raw_last_logits, dim=-1)
+
         # Repetition penalty over full context
         if repetition_penalty != 1.0:
             ctx = torch.tensor([generated], dtype=torch.long, device=device)
@@ -240,15 +245,11 @@ def generate_with_confidence(
                 logits[:, -1, :], ctx, repetition_penalty,
             )
 
-        # Compute softmax probabilities for confidence tracking
-        last_logits = logits[:, -1, :]
-        probs = F.softmax(last_logits, dim=-1)
-
         next_token = sample_next_token(logits, temperature, top_k, top_p)
         next_id    = next_token.item()
 
-        # Record confidence: the probability assigned to the chosen token
-        token_confidence = probs[0, next_id].item()
+        # Record confidence: true probability assigned to the chosen token
+        token_confidence = raw_probs[0, next_id].item()
         per_token_confs.append(token_confidence)
 
         generated.append(next_id)
@@ -340,10 +341,17 @@ def generate_stream(
         # This preserves SentencePiece's ▁ → space conversion correctly
         new_ids.append(next_id)
         full_text = tokenizer.decode(new_ids, skip_special=True)
-        diff = full_text[len(prev_text):]
-        prev_text = full_text
-
-        if diff:
-            yield diff
+        # If text ends with replacement character, wait for subsequent byte token to resolve UTF-8 character
+        if not full_text.endswith("\ufffd"):
+            diff = full_text[len(prev_text):]
+            prev_text = full_text
+            if diff:
+                yield diff
 
         input_tensor = next_token
+
+    if new_ids:
+        final_full = tokenizer.decode(new_ids, skip_special=True)
+        final_diff = final_full[len(prev_text):]
+        if final_diff and "\ufffd" not in final_diff:
+            yield final_diff

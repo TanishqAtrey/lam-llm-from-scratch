@@ -96,13 +96,18 @@ class VectorStore:
 
     def load(self, load_dir: str):
         """Loads the index and metadata from disk."""
-        index_path = os.path.join(load_dir, "faiss.index")
-        meta_path = os.path.join(load_dir, "metadata.json")
+        if os.path.isfile(load_dir):
+            index_path = load_dir
+            meta_path = os.path.join(os.path.dirname(load_dir), "metadata.json")
+        else:
+            index_path = os.path.join(load_dir, "faiss.index")
+            meta_path = os.path.join(load_dir, "metadata.json")
 
         if os.path.exists(index_path):
             if not hasattr(self, "_faiss") or self._faiss is None:
                 raise RuntimeError("FAISS is not installed. Run: pip install faiss-cpu")
             self.index = self._faiss.read_index(index_path)
+            self.dim = self.index.d
         if os.path.exists(meta_path):
             with open(meta_path, "r") as f:
                 self.metadata = json.load(f)

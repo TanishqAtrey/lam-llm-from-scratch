@@ -85,7 +85,7 @@ class LAMEvaluator:
         # Use a temp directory for ephemeral task stores (auto-cleaned on exit)
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_store_path = os.path.join(tmpdir, "eval_tasks.json")
-            env = TaskEnvironment(task_store_path=tmp_store_path, reference_date=self.reference_date)
+            env = TaskEnvironment(task_store_path=tmp_store_path, reference_date=self.reference_date, auto_save=False)
             agent = TaskAgent(self.model, self.tokenizer, env)
 
             loop_hits = 0
@@ -242,12 +242,17 @@ class LAMEvaluator:
             if isinstance(tasks, dict):
                 tasks = list(tasks.values())
             return set(self._canonical_task(t) for t in tasks)
-            
+
+        init_set = get_task_tuples(initial_state)
         final_set = get_task_tuples(final_state)
         expected_set = get_task_tuples(expected_state)
-        
-        # Any differences (tasks in final but not in expected) are wrong side effects
-        diff = final_set - expected_set
-        return len(diff) > 0
+
+        # Tasks that were supposed to remain unchanged from initial state
+        untouched_expected = init_set & expected_set
+        # Check if any untouched tasks were modified/removed, or unexpected tasks added
+        unintended_modifications = untouched_expected - final_set
+        unintended_additions = final_set - (init_set | expected_set)
+
+        return len(unintended_modifications) > 0 or len(unintended_additions) > 0
 
 

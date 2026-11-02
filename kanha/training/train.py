@@ -2,7 +2,7 @@
 kanha/training/train.py
 Pre-training from scratch on tokenized text data.
 
-Expects a .npy file of token ids (created by scripts/preprocess_data.py).
+Expects a .npy file of token ids (created by scripts/prepare_3b_tokens.py).
 Trains a causal language model with next-token prediction.
 
 Features:
@@ -89,6 +89,30 @@ def _evaluate_val_loss(model, val_dataset, device, batch_size, n_eval_batches=20
     return total_loss / n_eval_batches
 
 
+def _save_pretrain_checkpoint(path: str, model: KanhaModel, optimizer, scheduler, step: int, best_val_loss: float):
+    cfg_dict = {
+        "vocab_size":  model.vocab_size,
+        "dim":         model.dim,
+        "n_layers":    model.n_layers,
+        "n_heads":     model.n_heads,
+        "ff_dim":      model.ff_dim,
+        "max_seq_len": model.max_seq_len,
+        "dropout":     model.dropout_p,
+    }
+    if hasattr(model, "n_kv_heads") and model.n_kv_heads is not None:
+        cfg_dict["n_kv_heads"] = model.n_kv_heads
+
+    torch.save({
+        "step": step,
+        "model_config": cfg_dict,
+        "model_state": model.state_dict(),
+        "optimizer_state": optimizer.state_dict(),
+        "scheduler_state": scheduler.state_dict(),
+        "best_val_loss": best_val_loss,
+    }, path)
+    log.info(f"Checkpoint saved: {path} (with optimizer & scheduler states)")
+
+
 def train(args):
     """
     Main pre-training loop. Called from main.py train command.
@@ -126,13 +150,18 @@ def train(args):
 
     # ── Model ──
     start_step = 0
+    raw_ckpt = None
     if args.resume:
         log.info(f"Resuming from {args.resume}")
+        raw_ckpt = torch.load(args.resume, map_location="cpu", weights_only=False)
+        start_step = raw_ckpt.get("step", 0)
+        if start_step == 0:
+            import re
+            match = re.search(r"step(\d+)", os.path.basename(args.resume))
+            if match:
+                start_step = int(match.group(1))
         model = KanhaModel.from_pretrained(args.resume)
-        import re
-        match = re.search(r"step(\d+)", os.path.basename(args.resume))
-        if match:
-            start_step = int(match.group(1))
+        if start_step > 0:
             log.info(f"Resuming training from step {start_step}")
     else:
         log.info("Initializing new model from config")
@@ -168,12 +197,29 @@ def train(args):
         optimizer, lr_lambda, last_epoch=start_step - 1 if start_step > 0 else -1
     )
 
+    best_val_loss = float("inf")
+    # Restore optimizer and scheduler states if present in checkpoint
+    if raw_ckpt is not None:
+        if "optimizer_state" in raw_ckpt:
+            try:
+                optimizer.load_state_dict(raw_ckpt["optimizer_state"])
+                log.info("Restored AdamW optimizer state (momentum & variance buffers)")
+            except Exception as e:
+                log.warning(f"Could not restore optimizer state: {e}")
+        if "scheduler_state" in raw_ckpt:
+            try:
+                scheduler.load_state_dict(raw_ckpt["scheduler_state"])
+                log.info("Restored learning rate scheduler state")
+            except Exception as e:
+                log.warning(f"Could not restore scheduler state: {e}")
+        if "best_val_loss" in raw_ckpt:
+            best_val_loss = raw_ckpt["best_val_loss"]
+
     # ── Training loop ──
     save_dir = cfg.paths.base_model
     ensure_dir(save_dir)
 
     running_loss = 0.0
-    best_val_loss = float("inf")
     patience_counter = 0
     pbar = tqdm(
         range(start_step + 1, tc.max_steps + 1),
@@ -208,8 +254,7 @@ def train(args):
 
         if step % tc.save_every == 0:
             ckpt_path = os.path.join(save_dir, f"ckpt_step{step}.pt")
-            model.save_pretrained(ckpt_path)
-            log.info(f"Checkpoint saved: {ckpt_path}")
+            _save_pretrain_checkpoint(ckpt_path, model, optimizer, scheduler, step, best_val_loss)
 
         # ── Validation + Early stopping ──
         if val_dataset is not None and step % eval_every == 0:
@@ -222,7 +267,7 @@ def train(args):
                 best_val_loss = val_loss
                 patience_counter = 0
                 best_path = os.path.join(save_dir, "best_model.pt")
-                model.save_pretrained(best_path)
+                _save_pretrain_checkpoint(best_path, model, optimizer, scheduler, step, best_val_loss)
                 log.info(f"New best model saved (val_loss={val_loss:.4f})")
             else:
                 patience_counter += 1
@@ -236,6 +281,7 @@ def train(args):
 
     # Final save
     final_path = os.path.join(save_dir, "final_model.pt")
-    model.save_pretrained(final_path)
+    final_step = step if "step" in locals() else tc.max_steps
+    _save_pretrain_checkpoint(final_path, model, optimizer, scheduler, final_step, best_val_loss)
     log.info(f"Training complete! Model saved to {final_path}")
     log.info(f"Best validation loss: {best_val_loss:.4f} (saved to {save_dir}/best_model.pt)")

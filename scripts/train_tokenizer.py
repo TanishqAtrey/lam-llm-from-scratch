@@ -58,7 +58,6 @@ if __name__ == "__main__":
 
     print(f"\nDone. Tokenizer saved to {args.output}.model")
     print(f"\nNext step:")
-    print(f"  python scripts/preprocess_data.py \\")
-    print(f"      --input data/raw/ \\")
-    print(f"      --output data/processed/train.npy \\")
-    print(f"      --tokenizer {args.output}.model")
+    print(f"  python scripts/prepare_3b_tokens.py \\")
+    print(f"      --tokenizer {args.output}.model \\")
+    print(f"      --output data/processed/train.npy")

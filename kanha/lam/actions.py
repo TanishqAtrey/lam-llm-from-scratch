@@ -66,13 +66,25 @@ def parse_action(text: str) -> tuple[str, dict]:
                     current_val += char
             else:
                 if char == quote_char:
-                    # Only close quote if next non-space char is comma, ')', or end-of-string
-                    # This allows apostrophes inside single-quoted values (e.g. "cat's")
-                    rest = args_str[i + 1:].lstrip()
-                    if not rest or rest[0] in (',', ')'):
-                        in_quotes = False
+                    # Check if escaped by an odd number of preceding backslashes
+                    num_bs = 0
+                    j = i - 1
+                    while j >= 0 and args_str[j] == '\\':
+                        num_bs += 1
+                        j -= 1
+                    is_escaped = (num_bs % 2 == 1)
+
+                    if is_escaped:
+                        # Replace the preceding backslash with the escaped quote char
+                        current_val = current_val[:-1] + char
                     else:
-                        current_val += char
+                        # Only close quote if next non-space char is comma, ')', or end-of-string
+                        # This allows apostrophes inside single-quoted values (e.g. "cat's")
+                        rest = args_str[i + 1:].lstrip()
+                        if not rest or rest[0] in (',', ')'):
+                            in_quotes = False
+                        else:
+                            current_val += char
                 else:
                     current_val += char
                     

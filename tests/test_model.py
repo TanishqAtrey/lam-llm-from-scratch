@@ -128,7 +128,7 @@ def test_save_load(small_model, tmp_path):
     for (n1, p1), (n2, p2) in zip(
         small_model.named_parameters(), loaded.named_parameters()
     ):
-        assert torch.allclose(p1, p2), f"Mismatch in {n1}"
+        assert torch.allclose(p1.cpu(), p2.cpu()), f"Mismatch in {n1}"
 
 
 def test_generation_runs(small_model):

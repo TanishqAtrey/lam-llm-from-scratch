@@ -88,17 +88,26 @@ class InferenceEngine:
         # Load tokenizer
         tokenizer = KanhaTokenizer(tokenizer_path)
 
-        # Load RAG retriever if index provided
+        # Load RAG retriever if requested
         retriever = None
-        if use_rag and index_dir and os.path.isdir(index_dir):
-            try:
-                from kanha.rag.retriever import Retriever
-                retriever = Retriever()
-                retriever.load_index(index_dir)
-                log.info(f"RAG index loaded from {index_dir}")
-            except Exception as e:
-                log.warning(f"Failed to load RAG index: {e}")
-                use_rag = False
+        if use_rag:
+            target_index = index_dir
+            if not target_index and hasattr(cfg, "rag") and hasattr(cfg.rag, "index_path"):
+                target_index = cfg.rag.index_path
+            if target_index:
+                resolved_index = os.path.dirname(target_index) if os.path.isfile(target_index) else target_index
+                if os.path.isdir(resolved_index):
+                    try:
+                        from kanha.rag.retriever import Retriever
+                        retriever = Retriever()
+                        retriever.load_index(resolved_index)
+                        log.info(f"RAG index loaded from {resolved_index}")
+                    except Exception as e:
+                        log.warning(f"Failed to load RAG index: {e}")
+                        use_rag = False
+                else:
+                    log.warning(f"RAG index directory not found at {resolved_index}")
+                    use_rag = False
 
         engine = cls(
             model=model,
@@ -110,6 +119,71 @@ class InferenceEngine:
 
         log.info("InferenceEngine ready")
         return engine
+
+    def chat_stream(self, user_message: str):
+        """
+        Streaming generator that yields response tokens and tool outputs as they arrive.
+        Updates conversation memory upon completion.
+        """
+        # 1. RAG retrieval
+        retrieved_chunks = None
+        if self.use_rag and self.retriever:
+            try:
+                results = self.retriever.retrieve(user_message, top_k=cfg.rag.top_k)
+                retrieved_chunks = [r["text"] for r in results]
+            except Exception as e:
+                log.warning(f"RAG retrieval failed: {e}")
+
+        # 2. Build prompt
+        tool_desc = ""
+        if self.use_tools and self.tool_router:
+            tool_desc = self.tool_router.format_tool_descriptions()
+
+        memory_ctx = self.memory.format() if len(self.memory) > 0 else ""
+        prompt = self.prompt_builder.build(
+            instruction=user_message,
+            memory_context=memory_ctx,
+            retrieved_chunks=retrieved_chunks,
+            tool_descriptions=tool_desc,
+        )
+
+        # 3. Stream tokens from model
+        response_parts = []
+        for token_text in generate_stream(
+            self.model,
+            self.tokenizer,
+            prompt,
+            max_new_tokens=cfg.inference.max_new_tokens,
+            temperature=cfg.inference.temperature,
+            top_k=cfg.inference.top_k,
+            top_p=cfg.inference.top_p,
+            repetition_penalty=cfg.inference.repetition_penalty,
+            device=self.device,
+        ):
+            response_parts.append(token_text)
+            yield token_text
+
+        raw_response = "".join(response_parts)
+        final_response = raw_response
+
+        # 4. Tool execution
+        if self.use_tools and self.tool_router:
+            executed_response = self.tool_router.maybe_execute(raw_response)
+            if executed_response != raw_response:
+                diff = executed_response[len(raw_response):]
+                yield diff
+                final_response = executed_response
+
+        # 5. Safety filter
+        try:
+            from kanha.alignment.filters import filter_response
+            final_response = filter_response(final_response)
+        except ImportError:
+            pass
+
+        # 6. Update memory
+        self.memory.add("user", user_message)
+        self.memory.add("assistant", final_response)
 
     def chat(self, user_message: str, stream: bool = False) -> str:
         """
@@ -130,6 +204,14 @@ class InferenceEngine:
         Returns:
             The model's response string
         """
+        if stream:
+            response_parts = []
+            for chunk in self.chat_stream(user_message):
+                print(chunk, end="", flush=True)
+                response_parts.append(chunk)
+            print()  # newline after streaming
+            return "".join(response_parts)
+
         # 1. RAG retrieval
         retrieved_chunks = None
         if self.use_rag and self.retriever:
@@ -140,52 +222,30 @@ class InferenceEngine:
                 log.warning(f"RAG retrieval failed: {e}")
 
         # 2. Build prompt with the SFT template
-        # NOTE: We do NOT include memory_context in the prompt because the SFT
-        # training data only had single-turn (instruction, response) pairs.
-        # Injecting conversation history into the prompt for a 40-60M model
-        # would be out-of-distribution and cause degraded output.
-        # Multi-turn requires training with conversation history in the data.
         tool_desc = ""
         if self.use_tools and self.tool_router:
             tool_desc = self.tool_router.format_tool_descriptions()
 
+        memory_ctx = self.memory.format() if len(self.memory) > 0 else ""
         prompt = self.prompt_builder.build(
             instruction=user_message,
-            memory_context="",
+            memory_context=memory_ctx,
             retrieved_chunks=retrieved_chunks,
             tool_descriptions=tool_desc,
         )
 
         # 3. Generate
-        if stream:
-            response_parts = []
-            for token_text in generate_stream(
-                self.model,
-                self.tokenizer,
-                prompt,
-                max_new_tokens=cfg.inference.max_new_tokens,
-                temperature=cfg.inference.temperature,
-                top_k=cfg.inference.top_k,
-                top_p=cfg.inference.top_p,
-                repetition_penalty=cfg.inference.repetition_penalty,
-                device=self.device,
-            ):
-                print(token_text, end="", flush=True)
-                response_parts.append(token_text)
-            print()  # newline after streaming
-            response = "".join(response_parts)
-        else:
-            response = generate(
-                self.model,
-                self.tokenizer,
-                prompt,
-                max_new_tokens=cfg.inference.max_new_tokens,
-                temperature=cfg.inference.temperature,
-                top_k=cfg.inference.top_k,
-                top_p=cfg.inference.top_p,
-                repetition_penalty=cfg.inference.repetition_penalty,
-                device=self.device,
-            )
+        response = generate(
+            self.model,
+            self.tokenizer,
+            prompt,
+            max_new_tokens=cfg.inference.max_new_tokens,
+            temperature=cfg.inference.temperature,
+            top_k=cfg.inference.top_k,
+            top_p=cfg.inference.top_p,
+            repetition_penalty=cfg.inference.repetition_penalty,
+            device=self.device,
+        )
 
         # 4. Tool execution
         if self.use_tools and self.tool_router:

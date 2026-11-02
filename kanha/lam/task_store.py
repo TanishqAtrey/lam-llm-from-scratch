@@ -35,9 +35,10 @@ class TaskStore:
     # Maximum number of undo operations to keep (configurable, no hardcoded magic number)
     MAX_UNDO_DEPTH = 10
 
-    def __init__(self, path='data/lam/tasks.json', reference_date=None, list_limit=None):
+    def __init__(self, path='data/lam/tasks.json', reference_date=None, list_limit=None, auto_save: bool = True):
         self.path = path
         self.reference_date = reference_date if reference_date else datetime.date.today()
+        self.auto_save = auto_save
         self._next_id = 1
         self._tasks: dict[int, Task] = {}
         self._undo_stack: list[tuple[str, dict]] = []
@@ -235,7 +236,9 @@ class TaskStore:
         self._next_id = 1
         self.save()
 
-    def save(self):
+    def save(self, force: bool = False):
+        if not self.auto_save and not force:
+            return
         parent_dir = os.path.dirname(os.path.abspath(self.path))
         os.makedirs(parent_dir, exist_ok=True)
         data = {
@@ -259,19 +262,24 @@ class TaskStore:
 
     def load(self):
         if os.path.exists(self.path):
-            if fcntl is not None:
-                lock_path = self.path + '.lock'
-                with open(lock_path, 'a') as lock_f:
-                    fcntl.flock(lock_f, fcntl.LOCK_SH)
+            try:
+                if fcntl is not None:
+                    lock_path = self.path + '.lock'
+                    with open(lock_path, 'a') as lock_f:
+                        fcntl.flock(lock_f, fcntl.LOCK_SH)
+                        with open(self.path, 'r') as f:
+                            data = json.load(f)
+                else:
                     with open(self.path, 'r') as f:
                         data = json.load(f)
-            else:
-                with open(self.path, 'r') as f:
-                    data = json.load(f)
-            self._next_id = data.get('next_id', 1)
-            self._tasks = {
-                int(k): Task(**v) for k, v in data.get('tasks', {}).items()
-            }
+                self._next_id = data.get('next_id', 1)
+                self._tasks = {
+                    int(k): Task(**v) for k, v in data.get('tasks', {}).items()
+                }
+            except (json.JSONDecodeError, ValueError) as e:
+                logger.warning(f"Failed to load tasks from {self.path} (corrupted or empty): {e}. Initializing empty store.")
+                self._next_id = 1
+                self._tasks = {}
 
     @staticmethod
     def resolve_symbolic_date(symbolic: str, reference_date=None) -> str:

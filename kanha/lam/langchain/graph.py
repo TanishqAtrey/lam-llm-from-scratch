@@ -108,7 +108,8 @@ def _make_generate_node(llm: KanhaLLM):
         prompt = format_step_prompt(state["goal"], state["history"])
 
         temp = 0.0 if state["retry_count"] == 0 else 0.3
-        raw, confidence = llm.generate_action_with_confidence(prompt, temperature=temp)
+        k = llm.top_k if state["retry_count"] == 0 else max(llm.top_k, 50)
+        raw, confidence = llm.generate_action_with_confidence(prompt, temperature=temp, top_k=k)
 
         return {"raw_action": raw, "confidence": confidence}
 

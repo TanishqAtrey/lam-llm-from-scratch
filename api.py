@@ -13,6 +13,7 @@ Run:
 
 import os
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List
 
@@ -124,13 +125,15 @@ def create_app(model_path: Optional[str] = None, index_dir: Optional[str] = None
             "loaded": _engine is not None or os.path.exists(resolved_path),
         }
 
-    @app.post("/chat", response_model=ChatResponse)
+    @app.post("/chat")
     def chat(req: ChatRequest):
         text = req.prompt if req.prompt is not None else req.message
         if not text or not text.strip():
             raise HTTPException(status_code=400, detail="Message or prompt cannot be empty.")
         try:
             engine = get_engine()
+            if req.stream:
+                return StreamingResponse(engine.chat_stream(text), media_type="text/plain")
             response = engine.chat(text, stream=False)
             return ChatResponse(response=response)
         except HTTPException:

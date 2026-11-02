@@ -54,7 +54,8 @@ class LoRALinear(nn.Module):
 
 class LoRAModel(nn.Module):
     def __init__(self, model: nn.Module, rank: int = None, alpha: float = None,
-                 lora_dropout: float = None, target_modules: Optional[List[str]] = None):
+                 lora_dropout: float = None, target_modules: Optional[List[str]] = None,
+                 dropout: float = None):
         super().__init__()
         self.model = model
 
@@ -64,6 +65,9 @@ class LoRAModel(nn.Module):
             lora_cfg = getattr(cfg, 'lora', None)
         except Exception:
             lora_cfg = None
+
+        if dropout is not None and lora_dropout is None:
+            lora_dropout = dropout
 
         self.rank = rank if rank is not None else (getattr(lora_cfg, 'rank', 8) if lora_cfg else 8)
         self.alpha = alpha if alpha is not None else (getattr(lora_cfg, 'alpha', float(self.rank)) if lora_cfg else float(self.rank))
@@ -139,50 +143,51 @@ class LoRAModel(nn.Module):
         log.info("LoRA weights merged into base model.")
         return self.model
 
-    def save_pretrained(self, path: str, merge: bool = True):
+    def save_pretrained(self, path: str, step: int = None):
         """
-        Saves the model checkpoint.
-        If merge=True (default), merges LoRA adapter weights into base weights
-        first so the saved checkpoint can be loaded cleanly by KanhaModel.from_pretrained().
-        If merge=False, extracts the clean base weights with merged delta applied for serialization,
-        ensuring the saved checkpoint is always directly loadable by KanhaModel.from_pretrained()
-        without mutating the live in-memory LoRA model.
+        Saves the model checkpoint with LoRA weights merged into the base weights.
+        Non-destructive: does NOT mutate or unload the in-memory LoRA layers,
+        so training can safely continue for subsequent epochs/steps.
+        The resulting checkpoint is 100% compatible with KanhaModel.from_pretrained().
         """
-        if merge:
-            merged_model = self.merge_and_unload()
-            merged_model.save_pretrained(path)
-        else:
-            clean_state = {}
-            for k, v in self.model.state_dict().items():
-                if ".linear." in k:
-                    base_k = k.replace(".linear.", ".")
-                    clean_state[base_k] = v.clone()
-                elif "lora_A" in k or "lora_B" in k:
-                    continue
-                else:
-                    clean_state[k] = v.clone()
+        clean_state = {}
+        for k, v in self.model.state_dict().items():
+            if ".linear." in k:
+                base_k = k.replace(".linear.", ".")
+                clean_state[base_k] = v.clone()
+            elif "lora_A" in k or "lora_B" in k:
+                continue
+            else:
+                clean_state[k] = v.clone()
 
-            for name, module in self.model.named_modules():
-                if isinstance(module, LoRALinear):
-                    weight_key = f"{name}.weight"
-                    delta = (module.scaling * module.lora_B @ module.lora_A).to(
-                        dtype=module.linear.weight.dtype, device=module.linear.weight.device
-                    )
-                    clean_state[weight_key] = module.linear.weight.data + delta
+        for name, module in self.model.named_modules():
+            if isinstance(module, LoRALinear):
+                weight_key = f"{name}.weight"
+                delta = (module.scaling * module.lora_B @ module.lora_A).to(
+                    dtype=module.linear.weight.dtype, device=module.linear.weight.device
+                )
+                clean_state[weight_key] = module.linear.weight.data + delta
 
-            torch.save({
-                "model_config": {
-                    "vocab_size":  self.model.vocab_size,
-                    "dim":         self.model.dim,
-                    "n_layers":    self.model.n_layers,
-                    "n_heads":     self.model.n_heads,
-                    "ff_dim":      self.model.ff_dim,
-                    "max_seq_len": self.model.max_seq_len,
-                    "dropout":     self.model.dropout_p,
-                },
-                "model_state": clean_state,
-            }, path)
-            log.info(f"Model saved to {path} (compatible state_dict with LoRA applied)")
+        cfg_dict = {
+            "vocab_size":  self.model.vocab_size,
+            "dim":         self.model.dim,
+            "n_layers":    self.model.n_layers,
+            "n_heads":     self.model.n_heads,
+            "ff_dim":      self.model.ff_dim,
+            "max_seq_len": self.model.max_seq_len,
+            "dropout":     self.model.dropout_p,
+        }
+        if hasattr(self.model, "n_kv_heads") and self.model.n_kv_heads is not None:
+            cfg_dict["n_kv_heads"] = self.model.n_kv_heads
+
+        data = {
+            "model_config": cfg_dict,
+            "model_state": clean_state,
+        }
+        if step is not None:
+            data["step"] = step
+        torch.save(data, path)
+        log.info(f"Model saved to {path} (compatible state_dict with LoRA applied, non-destructive)")
 
     def save_lora(self, path: str):
         lora_state = {k: v for k, v in self.state_dict().items()

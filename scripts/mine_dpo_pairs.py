@@ -229,13 +229,15 @@ def mine_dpo_pairs(args):
             else:
                 failures[idx] = result
 
-            # Run 2: with slight temperature for diverse failures
+            # Run 2: with slight temperature and relaxed top_k for diverse failures
             env.reset(initial_tasks=world)
-            # Temporarily adjust — run with a slightly higher temp to get different failures
             old_threshold = agent.CONFIDENCE_THRESHOLD
+            old_top_k = agent._gen_top_k
             agent.CONFIDENCE_THRESHOLD = 0.0  # don't gate on confidence for mining
+            agent._gen_top_k = 50             # relax top_k so temp=0.3 generates diverse trajectories
             result2 = agent.run(goal, temperature=0.3)
             agent.CONFIDENCE_THRESHOLD = old_threshold
+            agent._gen_top_k = old_top_k
 
             if result2.success and not result2.aborted:
                 if idx not in successes:

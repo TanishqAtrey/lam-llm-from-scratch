@@ -136,17 +136,19 @@ class KanhaLLM(BaseLLM):
         return self._clean_action(raw)
 
     def generate_action_with_confidence(
-        self, prompt: str, temperature: float = 0.0
+        self, prompt: str, temperature: float = 0.0, top_k: int = None, top_p: float = None
     ) -> tuple[str, float]:
         """Generate a cleaned action string and its mean token-level confidence score."""
+        k = top_k if top_k is not None else self.top_k
+        p = top_p if top_p is not None else self.top_p
         raw, confidence, _ = kanha_generate_with_confidence(
             self._model,
             self._tokenizer,
             prompt,
             max_new_tokens=self.max_new_tokens,
             temperature=temperature,
-            top_k=self.top_k,
-            top_p=self.top_p,
+            top_k=k,
+            top_p=p,
             repetition_penalty=self.repetition_penalty,
         )
         return self._clean_action(raw), confidence

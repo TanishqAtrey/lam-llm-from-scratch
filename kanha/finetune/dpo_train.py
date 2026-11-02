@@ -206,6 +206,19 @@ def dpo_train(args):
     # Load policy model (start from SFT checkpoint)
     log.info(f"Loading policy model from {args.base_model}")
     policy = KanhaModel.from_pretrained(args.base_model)
+
+    if getattr(args, "lora", False):
+        from kanha.core.lora import LoRAModel
+        log.info("Wrapping policy model in LoRAModel adapter")
+        policy = LoRAModel(
+            policy,
+            rank=getattr(cfg.lora, "rank", 8),
+            alpha=getattr(cfg.lora, "alpha", 16.0),
+            dropout=getattr(cfg.lora, "dropout", 0.05),
+            target_modules=getattr(cfg.lora, "target_modules", ["q_proj", "v_proj"]),
+        )
+        policy.print_trainable_params()
+
     policy.train()
     policy.to(device)
 
@@ -249,8 +262,9 @@ def dpo_train(args):
     dpo_weight_decay = getattr(dpo_cfg, 'weight_decay', 0.0) if dpo_cfg else 0.0
     dpo_grad_clip = getattr(dpo_cfg, 'grad_clip', 1.0) if dpo_cfg else 1.0
 
+    trainable_params = [p for p in policy.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(
-        policy.parameters(),
+        trainable_params,
         lr=args.lr,
         weight_decay=dpo_weight_decay,
         betas=(0.9, 0.95),

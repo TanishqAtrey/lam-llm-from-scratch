@@ -70,7 +70,7 @@ class TrajectoryGenerator:
                     
                     # Create an ephemeral store for sampling the goal
                     tmp_store_path = os.path.join(tmpdir, f"store_{i}.json")
-                    store = TaskStore(path=tmp_store_path, reference_date=self.reference_date)
+                    store = TaskStore(path=tmp_store_path, reference_date=self.reference_date, auto_save=False)
                     
                     # For tier 7, we need duplicate/ambiguous titles
                     require_titles = None
@@ -90,7 +90,7 @@ class TrajectoryGenerator:
                     
                     # Create a fresh environment for the oracle to solve
                     tmp_env_path = os.path.join(tmpdir, f"env_{i}.json")
-                    env = TaskEnvironment(task_store_path=tmp_env_path, reference_date=self.reference_date)
+                    env = TaskEnvironment(task_store_path=tmp_env_path, reference_date=self.reference_date, auto_save=False)
                     env.reset(initial_tasks=world_tasks)
                     
                     try:

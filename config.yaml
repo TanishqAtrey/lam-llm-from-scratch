@@ -15,7 +15,7 @@ training:
   warmup_steps: 1000      # 1000 warmup steps for 92k schedule
   max_steps: 92000        # ~3.0B tokens at 32,768 tok/step
   grad_clip: 1.0
-  save_every: 5000        # saves every ~1.5h on T4 GPU (~18 ckpts = ~3GB total disk)
+  save_every: 10000        # saves every ~1.5h on T4 GPU (~18 ckpts = ~3GB total disk)
   log_every: 50
   # Early stopping (used by pretrain, SFT, LAM-SFT)
   val_fraction: 0.05      # 5% reserved for validation (~150M tokens)

@@ -144,6 +144,7 @@ args = SimpleNamespace(
     lr=3e-5,           # safe learning rate
     val_fraction=0.1,  # 10% held-out for validation
     patience=3,        # early stop after 3 epochs without val improvement
+    lora=False,        # set to True to use LoRA parameter-efficient training
 )
 
 sft_train(args)

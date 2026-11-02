@@ -29,7 +29,7 @@ import numpy as np
 from datasets import load_dataset
 from tqdm import tqdm
 from pathlib import Path
-from kanha.core.tokenizer import KanhaTokenizer
+from kanha.core.tokenizer import KanhaTokenizer, train_tokenizer
 from kanha.utils.logging import get_logger
 
 log = get_logger("prepare_3b")
@@ -38,7 +38,35 @@ FLUSH_EVERY = 500_000   # flush every 500k tokens to keep RAM < 50MB
 
 
 def prepare_3b_tokens(args):
-    tokenizer = KanhaTokenizer(args.tokenizer)
+    tok_path = Path(args.tokenizer)
+    if not tok_path.exists():
+        log.info(f"Tokenizer not found at {tok_path}.")
+        log.info("Bootstrapping tokenizer from FineWeb-Edu sample (~50k texts)...")
+        tok_train_file = Path("data/raw/tokenizer_bootstrap.txt")
+        tok_train_file.parent.mkdir(parents=True, exist_ok=True)
+        ds_sample = load_dataset(
+            "HuggingFaceFW/fineweb-edu",
+            name="sample-10BT",
+            split="train",
+            streaming=True,
+        )
+        with open(tok_train_file, "w", encoding="utf-8") as f:
+            for i, row in enumerate(ds_sample):
+                if i >= 50_000:
+                    break
+                t = row.get("text", "").strip()
+                if t:
+                    f.write(t + "\n")
+        train_tokenizer(
+            input_files=str(tok_train_file),
+            model_prefix=str(tok_path.parent / tok_path.stem),
+            vocab_size=16000,
+        )
+        if tok_train_file.exists():
+            tok_train_file.unlink()
+        log.info(f"✓ Tokenizer trained and saved to {tok_path}")
+
+    tokenizer = KanhaTokenizer(str(tok_path))
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -105,6 +133,15 @@ def prepare_3b_tokens(args):
         for row in ds:
             text = row.get(src["field"], "")
             if not text:
+                if "code" in row:
+                    text = row["code"]
+                elif "content" in row:
+                    text = row["content"]
+                elif "output" in row or "instruction" in row:
+                    inst = row.get("instruction", "").strip()
+                    out = row.get("output", "").strip()
+                    text = f"{inst}\n\n{out}" if inst and out else (out or inst)
+            if not text:
                 continue
             text = text.strip()
             if len(text) < 40:
@@ -114,9 +151,7 @@ def prepare_3b_tokens(args):
             if remaining <= 0:
                 break
 
-            ids = tokenizer.encode(text, add_bos=True, add_eos=True)
-            if len(ids) > remaining:
-                ids = ids[:remaining]
+            ids = tokenizer.encode(text, add_bos=True, add_eos=True, max_length=remaining)
 
             buffer.extend(ids)
             count = len(ids)
@@ -148,6 +183,37 @@ def prepare_3b_tokens(args):
 
     mmap.flush()
     del mmap
+
+    # Truncate any zero-padded tail so no raw 0s (<pad> tokens) poison pretraining
+    if cursor < total_target:
+        log.warning(
+            f"Streaming terminated early: wrote {cursor:,} tokens "
+            f"(target was {total_target:,})."
+        )
+        log.info("Truncating .npy file header and payload to exact written token count...")
+        with open(out_path, "rb+") as f:
+            import struct
+            version = np.lib.format.read_magic(f)
+            if version == (1, 0):
+                np.lib.format.read_array_header_1_0(f)
+                prefix_len = 10
+            else:
+                np.lib.format.read_array_header_2_0(f)
+                prefix_len = 12
+            header_len = f.tell()
+            H = header_len - prefix_len
+            d = {"descr": "<u2", "fortran_order": False, "shape": (cursor,)}
+            s = str(d)
+            padding = H - len(s) - 1
+            if padding >= 0:
+                header_str = s + (" " * padding) + "\n"
+                f.seek(0)
+                if version == (1, 0):
+                    f.write(b"\x93NUMPY\x01\x00" + struct.pack("<H", H) + header_str.encode("latin1"))
+                else:
+                    f.write(b"\x93NUMPY\x02\x00" + struct.pack("<I", H) + header_str.encode("latin1"))
+            f.truncate(header_len + cursor * 2)
+        log.info(f"✓ File truncated to exact {cursor:,} tokens. Zero-padding eliminated.")
 
     total_tokens = cursor
     size_gb = out_path.stat().st_size / 1e9

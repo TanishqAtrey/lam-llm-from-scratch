@@ -163,6 +163,19 @@ def lam_sft_train(args):
     # ── Load base model ──
     log.info(f"Loading base model from {args.base_model}")
     model = KanhaModel.from_pretrained(args.base_model)
+
+    if getattr(args, "lora", False):
+        from kanha.core.lora import LoRAModel
+        log.info("Wrapping model in LoRAModel adapter")
+        model = LoRAModel(
+            model,
+            rank=getattr(cfg.lora, "rank", 8),
+            alpha=getattr(cfg.lora, "alpha", 16.0),
+            dropout=getattr(cfg.lora, "dropout", 0.05),
+            target_modules=getattr(cfg.lora, "target_modules", ["q_proj", "v_proj"]),
+        )
+        model.print_trainable_params()
+
     model.train()
     model.to(device)
 
@@ -192,8 +205,9 @@ def lam_sft_train(args):
     log.info(f"Split: {train_size:,} train / {val_size:,} val steps")
 
     # ── Optimizer (same safe defaults as sft_train) ──
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        trainable_params,
         lr=args.lr,
         weight_decay=cfg.training.weight_decay,
         betas=(0.9, 0.95),

@@ -8,11 +8,13 @@ Key optimisations:
   3. use_cache=True during inference — standard KV cache
 """
 
+import math
 import torch
 import torch.nn as nn
 from typing import Optional, List, Tuple
 
 from kanha.core.layers import TransformerBlock, RMSNorm
+from kanha.core.layers_gqa import TransformerBlockGQA
 from kanha.utils.config import cfg
 from kanha.utils.helpers import get_device, count_parameters
 from kanha.utils.logging import get_logger
@@ -31,6 +33,7 @@ class KanhaModel(nn.Module):
         ff_dim: int      = None,
         max_seq_len: int = None,
         dropout: float   = None,
+        n_kv_heads: int  = None,
     ):
         super().__init__()
 
@@ -42,14 +45,21 @@ class KanhaModel(nn.Module):
         self.ff_dim      = ff_dim      if ff_dim      is not None else mc.ff_dim
         self.max_seq_len = max_seq_len if max_seq_len is not None else mc.max_seq_len
         self.dropout_p   = dropout     if dropout     is not None else mc.dropout
+        self.n_kv_heads  = n_kv_heads  if n_kv_heads  is not None else getattr(mc, "n_kv_heads", None)
 
         self.token_emb = nn.Embedding(self.vocab_size, self.dim)
         self.drop      = nn.Dropout(self.dropout_p)
 
-        self.layers = nn.ModuleList([
-            TransformerBlock(self.dim, self.n_heads, self.ff_dim, self.dropout_p)
-            for _ in range(self.n_layers)
-        ])
+        if self.n_kv_heads is not None and self.n_kv_heads < self.n_heads:
+            self.layers = nn.ModuleList([
+                TransformerBlockGQA(self.dim, self.n_heads, self.n_kv_heads, self.ff_dim, self.dropout_p, max_seq_len=self.max_seq_len)
+                for _ in range(self.n_layers)
+            ])
+        else:
+            self.layers = nn.ModuleList([
+                TransformerBlock(self.dim, self.n_heads, self.ff_dim, self.dropout_p, max_seq_len=self.max_seq_len)
+                for _ in range(self.n_layers)
+            ])
 
         self.norm    = RMSNorm(self.dim)
        
@@ -58,6 +68,16 @@ class KanhaModel(nn.Module):
         self.lm_head.weight = self.token_emb.weight
 
         self.apply(self._init_weights)
+
+        # Residual projection scaling (GPT-2 / Megatron-LM style)
+        # Scales residual branch weights by 1/sqrt(2 * n_layers) to stabilize variance growth
+        res_scale = 1.0 / math.sqrt(2.0 * self.n_layers)
+        for layer in self.layers:
+            if hasattr(layer, "attn") and hasattr(layer.attn, "out_proj"):
+                layer.attn.out_proj.weight.data.mul_(res_scale)
+            if hasattr(layer, "ffn") and hasattr(layer.ffn, "w2"):
+                layer.ffn.w2.weight.data.mul_(res_scale)
+
         log.info(f"KanhaModel | params: {count_parameters(self):,}")
 
     def _init_weights(self, module):
@@ -111,13 +131,13 @@ class KanhaModel(nn.Module):
                     ignore_index=-100,
                 )
             else:
-                loss = torch.tensor(0.0, device=logits.device, requires_grad=True)
+                loss = logits.sum() * 0.0
 
         return logits, loss, new_caches
 
     @classmethod
-    def from_pretrained(cls, path: str) -> "KanhaModel":
-        device     = get_device()
+    def from_pretrained(cls, path: str, device: Optional[torch.device] = None) -> "KanhaModel":
+        device     = device or get_device()
         checkpoint = torch.load(path, map_location=device, weights_only=False)
         model      = cls(**checkpoint.get("model_config", {}))
         model.load_state_dict(checkpoint["model_state"])
@@ -125,17 +145,23 @@ class KanhaModel(nn.Module):
         log.info(f"Loaded model from {path}")
         return model
 
-    def save_pretrained(self, path: str):
-        torch.save({
-            "model_config": {
-                "vocab_size":  self.vocab_size,
-                "dim":         self.dim,
-                "n_layers":    self.n_layers,
-                "n_heads":     self.n_heads,
-                "ff_dim":      self.ff_dim,
-                "max_seq_len": self.max_seq_len,
-                "dropout":     self.dropout_p,
-            },
+    def save_pretrained(self, path: str, step: int = None):
+        cfg_dict = {
+            "vocab_size":  self.vocab_size,
+            "dim":         self.dim,
+            "n_layers":    self.n_layers,
+            "n_heads":     self.n_heads,
+            "ff_dim":      self.ff_dim,
+            "max_seq_len": self.max_seq_len,
+            "dropout":     self.dropout_p,
+        }
+        if self.n_kv_heads is not None:
+            cfg_dict["n_kv_heads"] = self.n_kv_heads
+        data = {
+            "model_config": cfg_dict,
             "model_state": self.state_dict(),
-        }, path)
+        }
+        if step is not None:
+            data["step"] = step
+        torch.save(data, path)
         log.info(f"Model saved to {path}")

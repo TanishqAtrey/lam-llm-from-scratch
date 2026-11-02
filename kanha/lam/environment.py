@@ -4,7 +4,7 @@ from kanha.lam.task_store import TaskStore, Task
 from kanha.lam.actions import parse_action, validate_action, execute_action, ActionParseError
 
 class TaskEnvironment:
-    def __init__(self, reference_date=None, task_store_path=None):
+    def __init__(self, reference_date=None, task_store_path=None, auto_save: bool = True):
         # Read defaults from config if not provided
         try:
             from kanha.utils.config import cfg
@@ -17,7 +17,7 @@ class TaskEnvironment:
             if task_store_path is None:
                 task_store_path = 'data/lam/tasks.json'
 
-        self.store = TaskStore(path=task_store_path, reference_date=reference_date)
+        self.store = TaskStore(path=task_store_path, reference_date=reference_date, auto_save=auto_save)
         self._history: list[dict] = []
 
     def reset(self, initial_tasks: Optional[list[dict]] = None):

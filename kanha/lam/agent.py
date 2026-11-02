@@ -79,9 +79,12 @@ class TaskAgent:
             for attempt in range(self.max_retries + 1):
                 if attempt == 0:
                     temp = temperature if temperature is not None else 0.0
+                    k = self._gen_top_k
                 else:
                     temp = max(temperature if temperature is not None else 0.0, 0.3)
-                raw_action, confidence = self._generate_action(prompt, temperature=temp)
+                    # Relax top_k on retry so non-zero temperature produces diverse alternative actions
+                    k = max(self._gen_top_k, 50)
+                raw_action, confidence = self._generate_action(prompt, temperature=temp, top_k=k)
                 
                 if not raw_action:
                     error_msg = "Empty action generated"
@@ -178,16 +181,17 @@ class TaskAgent:
                 
         return result
     
-    def _generate_action(self, prompt: str, temperature: float = 0.0) -> tuple[str, float]:
+    def _generate_action(self, prompt: str, temperature: float = 0.0, top_k: int = None) -> tuple[str, float]:
         """
         Generate an action with confidence score.
         Returns (action_text, mean_confidence).
         """
+        k = top_k if top_k is not None else self._gen_top_k
         raw, confidence, _ = generate_with_confidence(
             self.model, self.tokenizer, prompt,
             max_new_tokens=self._gen_max_tokens,
             temperature=temperature,
-            top_k=self._gen_top_k,
+            top_k=k,
         )
         return self._clean_action(raw), confidence
     

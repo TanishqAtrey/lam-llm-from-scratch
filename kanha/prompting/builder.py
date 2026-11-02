@@ -22,10 +22,11 @@ from typing import List, Optional
 INSTRUCTION_TEMPLATE = "### Instruction:\n{instruction}\n\n### Response:\n"
 FULL_TEMPLATE = "### Instruction:\n{instruction}\n\n### Response:\n{response}"
 
-# RAG-augmented version
+# RAG-augmented version — canonical instruction prefix with embedded context
 RAG_TEMPLATE = (
-    "### Retrieved Context:\n{context}\n\n"
-    "### Instruction:\n{instruction}\n\n"
+    "### Instruction:\n"
+    "Retrieved Context:\n{context}\n\n"
+    "{instruction}\n\n"
     "### Response:\n"
 )
 

@@ -53,6 +53,7 @@ def main():
                        help="Fraction of data for validation (default 0.1)")
     ft_p.add_argument("--patience", type=int, default=3,
                        help="Early stop after N epochs without val improvement")
+    ft_p.add_argument("--lora", action="store_true", help="Enable LoRA parameter-efficient fine-tuning")
 
     # ── train-tokenizer ───────────────────────────────────────────────────
     tok_p = sub.add_parser("train-tokenizer", help="Train a new BPE tokenizer")
@@ -75,6 +76,7 @@ def main():
     dpo_p.add_argument("--lr",         type=float, default=1e-6)
     dpo_p.add_argument("--beta",       type=float, default=0.1)
     dpo_p.add_argument("--lam_mode",   action="store_true", help="Enable LAM DPO mode for agent trajectories")
+    dpo_p.add_argument("--lora",       action="store_true", help="Enable LoRA adapter for policy model")
 
     # ── api ───────────────────────────────────────────────────────────────
     api_p = sub.add_parser("api", help="Start FastAPI server")
@@ -87,10 +89,13 @@ def main():
     lamgen_p.add_argument("--output", default="data/lam/trajectories.jsonl")
     lamgen_p.add_argument("--count", "--num", dest="count", type=int, default=100000)
     lamgen_p.add_argument("--seed",   type=int, default=42)
+    lamgen_p.add_argument("--split",  action="store_true",
+                          help="Automatically split output into train.jsonl, val.jsonl, and test.jsonl")
 
     # ── lam-train ─────────────────────────────────────────────────────────
     lamtrain_p = sub.add_parser("lam-train", help="SFT training for LAM")
-    lamtrain_p.add_argument("--base_model", "--model", dest="base_model", required=True)
+    lamtrain_p.add_argument("--base_model", "--model", dest="base_model", default="models/base/final_model.pt",
+                            help="Path to base pretrained model (default: models/base/final_model.pt)")
     lamtrain_p.add_argument("--data",       required=True)
     lamtrain_p.add_argument("--output",     default="models/lam/")
     lamtrain_p.add_argument("--epochs",     type=int, default=3)
@@ -100,16 +105,19 @@ def main():
                              help="Fraction of data for validation (default 0.1)")
     lamtrain_p.add_argument("--patience", type=int, default=3,
                              help="Early stop after N epochs without val improvement")
+    lamtrain_p.add_argument("--lora", action="store_true", help="Enable LoRA parameter-efficient training")
 
     # ── lam-dpo ───────────────────────────────────────────────────────────
     lamdpo_p = sub.add_parser("lam-dpo", help="DPO alignment for LAM")
-    lamdpo_p.add_argument("--base_model", "--model", dest="base_model", required=True)
+    lamdpo_p.add_argument("--base_model", "--model", dest="base_model", default="models/lam/lam_sft.pt",
+                          help="Path to base SFT model for DPO (default: models/lam/lam_sft.pt)")
     lamdpo_p.add_argument("--data",       required=True)
     lamdpo_p.add_argument("--output",     default="models/lam/")
     lamdpo_p.add_argument("--epochs",     type=int, default=1)
     lamdpo_p.add_argument("--batch_size", type=int, default=1)
     lamdpo_p.add_argument("--lr",         type=float, default=1e-6)
     lamdpo_p.add_argument("--beta",       type=float, default=0.1)
+    lamdpo_p.add_argument("--lora",       action="store_true", help="Enable LoRA adapter for policy model")
 
     # ── agent ─────────────────────────────────────────────────────────────
     agent_p = sub.add_parser("agent", help="Run Kanha Tasks agent (LAM)")
@@ -228,7 +236,8 @@ def _start_api(args):
 
 def _lam_generate(args):
     """Generates LAM training data."""
-    from kanha.lam.data.generator import TrajectoryGenerator
+    import os
+    from kanha.lam.data.generator import TrajectoryGenerator, split_data
     from kanha.utils.helpers import ensure_dir
 
     ensure_dir(os.path.dirname(args.output))
@@ -240,6 +249,17 @@ def _lam_generate(args):
     print(f"\nGenerated {stats['total']:,} trajectories to {args.output}")
     for tier, count in sorted(stats.get("per_tier", {}).items()):
         print(f"  {tier}: {count:,}")
+
+    if args.split:
+        out_dir = os.path.dirname(os.path.abspath(args.output))
+        train_path = os.path.join(out_dir, "train.jsonl")
+        val_path   = os.path.join(out_dir, "val.jsonl")
+        test_path  = os.path.join(out_dir, "test.jsonl")
+        split_stats = split_data(args.output, train_path, val_path, test_path, seed=args.seed)
+        print(f"\nSplit complete:")
+        print(f"  Train: {split_stats['train_size']:,} -> {train_path}")
+        print(f"  Val:   {split_stats['val_size']:,} -> {val_path}")
+        print(f"  Test:  {split_stats['test_size']:,} -> {test_path}")
 
 
 def _run_agent(args):

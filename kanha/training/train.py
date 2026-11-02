@@ -102,15 +102,21 @@ def _save_pretrain_checkpoint(path: str, model: KanhaModel, optimizer, scheduler
     if hasattr(model, "n_kv_heads") and model.n_kv_heads is not None:
         cfg_dict["n_kv_heads"] = model.n_kv_heads
 
-    torch.save({
+    ckpt_data = {
         "step": step,
         "model_config": cfg_dict,
         "model_state": model.state_dict(),
         "optimizer_state": optimizer.state_dict(),
         "scheduler_state": scheduler.state_dict(),
         "best_val_loss": best_val_loss,
-    }, path)
-    log.info(f"Checkpoint saved: {path} (with optimizer & scheduler states)")
+        "torch_rng_state": torch.get_rng_state(),
+        "numpy_rng_state": np.random.get_state(),
+    }
+    if torch.cuda.is_available():
+        ckpt_data["cuda_rng_state"] = torch.cuda.get_rng_state_all()
+
+    torch.save(ckpt_data, path)
+    log.info(f"Checkpoint saved: {path} (with optimizer, scheduler & RNG states)")
 
 
 def train(args):
@@ -214,6 +220,24 @@ def train(args):
                 log.warning(f"Could not restore scheduler state: {e}")
         if "best_val_loss" in raw_ckpt:
             best_val_loss = raw_ckpt["best_val_loss"]
+        if "torch_rng_state" in raw_ckpt:
+            try:
+                torch.set_rng_state(raw_ckpt["torch_rng_state"])
+                log.info("Restored PyTorch RNG state")
+            except Exception as e:
+                log.warning(f"Could not restore PyTorch RNG state: {e}")
+        if "numpy_rng_state" in raw_ckpt:
+            try:
+                np.random.set_state(raw_ckpt["numpy_rng_state"])
+                log.info("Restored NumPy RNG state")
+            except Exception as e:
+                log.warning(f"Could not restore NumPy RNG state: {e}")
+        if "cuda_rng_state" in raw_ckpt and raw_ckpt["cuda_rng_state"] is not None and torch.cuda.is_available():
+            try:
+                torch.cuda.set_rng_state_all(raw_ckpt["cuda_rng_state"])
+                log.info("Restored CUDA RNG state")
+            except Exception as e:
+                log.warning(f"Could not restore CUDA RNG state: {e}")
 
     # ── Training loop ──
     save_dir = cfg.paths.base_model

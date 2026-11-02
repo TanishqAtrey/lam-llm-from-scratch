@@ -24,11 +24,16 @@ Run:
 """
 
 import os
+import sys
+from pathlib import Path
+
+# Ensure repo root is on sys.path even when invoked from nested scripts directory
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 import argparse
 import numpy as np
 from datasets import load_dataset
 from tqdm import tqdm
-from pathlib import Path
 from kanha.core.tokenizer import KanhaTokenizer, train_tokenizer
 from kanha.utils.logging import get_logger
 

@@ -61,6 +61,12 @@ def main():
     tok_p.add_argument("--output", "--model_prefix", dest="output", default="models/tokenizer/tokenizer", help="Output prefix")
     tok_p.add_argument("--vocab_size", type=int, default=None, help="Vocabulary size")
 
+    # ── prepare-data ──────────────────────────────────────────────────────
+    prep_p = sub.add_parser("prepare-data", help="Stream and prepare 3B pretraining tokens")
+    prep_p.add_argument("--tokenizer", default="models/tokenizer/tokenizer.model")
+    prep_p.add_argument("--output", default="data/processed/train.npy")
+    prep_p.add_argument("--scale", type=float, default=1.0, help="Scale factor (1.0 = 3B tokens)")
+
     # ── index ─────────────────────────────────────────────────────────────
     idx_p = sub.add_parser("index", help="Build FAISS index from documents")
     idx_p.add_argument("--docs",   required=True, help="Directory of .txt files")
@@ -164,6 +170,10 @@ def main():
             model_prefix=args.output,
             vocab_size=args.vocab_size,
         )
+
+    elif args.command == "prepare-data":
+        from scripts.prepare_3b_tokens import prepare_3b_tokens
+        prepare_3b_tokens(args)
 
     elif args.command == "dpo":
         from kanha.finetune.dpo_train import dpo_train

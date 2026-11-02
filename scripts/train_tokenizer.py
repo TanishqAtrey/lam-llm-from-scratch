@@ -13,8 +13,13 @@ Run:
 """
 
 import os
-import argparse
+import sys
 from pathlib import Path
+
+# Ensure repo root is on sys.path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+import argparse
 from kanha.core.tokenizer import train_tokenizer
 
 

@@ -194,9 +194,19 @@ def train(args):
         betas=(0.9, 0.95),
     )
 
-    # Ensure 'initial_lr' is defined on all param groups (required by PyTorch when resuming with last_epoch >= 0)
+    # 1. Restore optimizer state from checkpoint first (if resuming)
+    if raw_ckpt is not None:
+        opt_state = raw_ckpt.get("optimizer_state") or raw_ckpt.get("optimizer")
+        if opt_state is not None:
+            try:
+                optimizer.load_state_dict(opt_state)
+                log.info("Restored AdamW optimizer state (momentum & variance buffers)")
+            except Exception as e:
+                log.warning(f"Could not restore optimizer state: {e}")
+
+    # 2. Explicitly ensure 'initial_lr' is set on all param groups (required by PyTorch when last_epoch >= 0)
     for group in optimizer.param_groups:
-        group.setdefault("initial_lr", group.get("lr", tc.learning_rate))
+        group["initial_lr"] = tc.learning_rate
 
     # ── Cosine schedule with warmup ──
     def lr_lambda(step):
@@ -210,28 +220,24 @@ def train(args):
         optimizer, lr_lambda, last_epoch=start_step - 1 if start_step > 0 else -1
     )
 
+    # 3. Restore scheduler state if present in checkpoint
+    if raw_ckpt is not None:
+        sched_state = raw_ckpt.get("scheduler_state") or raw_ckpt.get("scheduler")
+        if sched_state is not None:
+            try:
+                scheduler.load_state_dict(sched_state)
+                log.info("Restored learning rate scheduler state")
+            except Exception as e:
+                log.warning(f"Could not restore scheduler state: {e}")
+
     use_amp = (device.type == "cuda")
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
     if use_amp:
         log.info("AMP FP16 Mixed Precision enabled (T4 Tensor Cores active)")
 
     best_val_loss = float("inf")
-    # Restore optimizer and scheduler states if present in checkpoint
+    # Restore scaler, val loss, and RNG states if present in checkpoint
     if raw_ckpt is not None:
-        if "optimizer_state" in raw_ckpt:
-            try:
-                optimizer.load_state_dict(raw_ckpt["optimizer_state"])
-                for group in optimizer.param_groups:
-                    group.setdefault("initial_lr", group.get("lr", tc.learning_rate))
-                log.info("Restored AdamW optimizer state (momentum & variance buffers)")
-            except Exception as e:
-                log.warning(f"Could not restore optimizer state: {e}")
-        if "scheduler_state" in raw_ckpt:
-            try:
-                scheduler.load_state_dict(raw_ckpt["scheduler_state"])
-                log.info("Restored learning rate scheduler state")
-            except Exception as e:
-                log.warning(f"Could not restore scheduler state: {e}")
         if "scaler_state" in raw_ckpt and scaler is not None and getattr(scaler, "is_enabled", lambda: False)():
             try:
                 scaler.load_state_dict(raw_ckpt["scaler_state"])

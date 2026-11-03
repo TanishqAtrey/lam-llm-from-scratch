@@ -443,4 +443,22 @@ def test_eval_every_default_fallback():
     assert (step % eval_every) in range(eval_every)
 
 
+def test_scheduler_resumption_initial_lr():
+    """Verify LambdaLR resumption works when last_epoch >= 0 without KeyError."""
+    p = torch.nn.Parameter(torch.zeros(10))
+    opt = torch.optim.AdamW([{"params": [p], "weight_decay": 0.01}], lr=0.0003)
+
+    for group in opt.param_groups:
+        group.setdefault("initial_lr", group.get("lr", 0.0003))
+
+    start_step = 35000
+    # Must not raise KeyError: "param 'initial_lr' is not specified in param_groups[0]..."
+    sched = torch.optim.lr_scheduler.LambdaLR(
+        opt, lambda s: 1.0, last_epoch=start_step - 1 if start_step > 0 else -1
+    )
+    # When last_epoch=34999 is passed, LambdaLR.__init__ calls step(), advancing last_epoch to 35000
+    assert sched.last_epoch == 35000
+
+
+
 

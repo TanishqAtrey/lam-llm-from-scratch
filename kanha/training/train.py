@@ -194,6 +194,10 @@ def train(args):
         betas=(0.9, 0.95),
     )
 
+    # Ensure 'initial_lr' is defined on all param groups (required by PyTorch when resuming with last_epoch >= 0)
+    for group in optimizer.param_groups:
+        group.setdefault("initial_lr", group.get("lr", tc.learning_rate))
+
     # ── Cosine schedule with warmup ──
     def lr_lambda(step):
         if step < tc.warmup_steps:
@@ -217,6 +221,8 @@ def train(args):
         if "optimizer_state" in raw_ckpt:
             try:
                 optimizer.load_state_dict(raw_ckpt["optimizer_state"])
+                for group in optimizer.param_groups:
+                    group.setdefault("initial_lr", group.get("lr", tc.learning_rate))
                 log.info("Restored AdamW optimizer state (momentum & variance buffers)")
             except Exception as e:
                 log.warning(f"Could not restore optimizer state: {e}")

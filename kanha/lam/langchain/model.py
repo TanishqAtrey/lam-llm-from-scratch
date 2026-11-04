@@ -13,7 +13,7 @@ from typing import Any, List, Optional, Mapping
 
 from langchain_core.callbacks.manager import CallbackManagerForLLMRun
 from langchain_core.language_models.llms import BaseLLM
-from pydantic import Field, PrivateAttr
+from pydantic import Field, PrivateAttr, ConfigDict
 
 from kanha.core.generation import (
     generate as kanha_generate,
@@ -47,8 +47,7 @@ class KanhaLLM(BaseLLM):
     _model: Any = PrivateAttr()
     _tokenizer: Any = PrivateAttr()
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def __init__(self, model: Any, tokenizer: Any, **kwargs: Any):
         """Create a KanhaLLM wrapper.

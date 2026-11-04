@@ -52,8 +52,10 @@ class LAMDPODataset(Dataset):
         mask_len = len(prompt_tokens)
         
         full_ids = self.tokenizer.encode(
-            full_text, add_bos=True, add_eos=True, max_length=self.max_len
+            full_text, add_bos=True, add_eos=True
         )
+        if len(full_ids) > self.max_len:
+            full_ids = full_ids[:self.max_len]
         
         # Standard shifted input/target pairs
         input_ids = full_ids[:-1]
@@ -62,29 +64,13 @@ class LAMDPODataset(Dataset):
         # Mask prompt tokens
         for i in range(min(mask_len - 1, len(labels))):
             labels[i] = -100
-
-        # Safety guard: ensure at least one supervised token remains
-        if not any(l != -100 for l in labels) and len(labels) > 0:
-            labels[-1] = full_ids[-1]
-            
-        # Pad/truncate to max_len - 1
-        seq_len = self.max_len - 1
-        pad_len = seq_len - len(input_ids)
-        if pad_len > 0:
-            input_ids = input_ids + [self.tokenizer.PAD_ID] * pad_len
-            labels = labels + [-100] * pad_len
-        else:
-            input_ids = input_ids[:seq_len]
-            labels = labels[:seq_len]
             
         return input_ids, labels
 
 
     def __getitem__(self, idx):
         ex = self.examples[idx]
-        prompt = ex.get('prompt')
-        if not prompt and 'goal' in ex:
-            prompt = format_step_prompt(ex.get('goal', ''), ex.get('history', []))
+        prompt = ex.get('prompt') or format_step_prompt(ex.get('goal', ''), ex.get('history', []))
         chosen = ex['chosen']
         rejected = ex['rejected']
         
@@ -97,3 +83,36 @@ class LAMDPODataset(Dataset):
             'rejected_input_ids': torch.tensor(r_tokens, dtype=torch.long),
             'rejected_labels': torch.tensor(r_labels, dtype=torch.long)
         }
+
+
+def lam_dpo_collate_fn(batch, pad_id=0):
+    """Dynamically pads chosen and rejected pairs to the maximum length in the batch."""
+    max_len = max(
+        max(len(x["chosen_input_ids"]) for x in batch),
+        max(len(x["rejected_input_ids"]) for x in batch),
+    )
+
+    b_c_ids, b_c_lbls, b_r_ids, b_r_lbls = [], [], [], []
+    for x in batch:
+        c_id, c_lbl = x["chosen_input_ids"], x["chosen_labels"]
+        r_id, r_lbl = x["rejected_input_ids"], x["rejected_labels"]
+        c_pad = max_len - len(c_id)
+        if c_pad > 0:
+            c_id = torch.cat([c_id, torch.full((c_pad,), pad_id, dtype=torch.long)])
+            c_lbl = torch.cat([c_lbl, torch.full((c_pad,), -100, dtype=torch.long)])
+        r_pad = max_len - len(r_id)
+        if r_pad > 0:
+            r_id = torch.cat([r_id, torch.full((r_pad,), pad_id, dtype=torch.long)])
+            r_lbl = torch.cat([r_lbl, torch.full((r_pad,), -100, dtype=torch.long)])
+        b_c_ids.append(c_id)
+        b_c_lbls.append(c_lbl)
+        b_r_ids.append(r_id)
+        b_r_lbls.append(r_lbl)
+
+    return {
+        "chosen_input_ids": torch.stack(b_c_ids),
+        "chosen_labels": torch.stack(b_c_lbls),
+        "rejected_input_ids": torch.stack(b_r_ids),
+        "rejected_labels": torch.stack(b_r_lbls),
+    }
+

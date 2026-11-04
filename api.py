@@ -121,7 +121,7 @@ def create_app(
         if _lam_model is None:
             lam_path = lam_model_path or os.getenv("KANHA_LAM_MODEL")
             if not lam_path:
-                for candidate in ["models/lam/lam_final.pt", "models/lam/lam_sft.pt"]:
+                for candidate in ["models/lam/dpo_final.pt", "models/lam/lam_final.pt", "models/lam/lam_sft.pt"]:
                     if os.path.exists(candidate):
                         lam_path = candidate
                         break
@@ -134,6 +134,7 @@ def create_app(
                     log.warning(f"Could not load LAM model from {lam_path}: {e}")
                     _lam_model = base_engine.model
             else:
+                log.warning("No dedicated LAM model checkpoint found; falling back to base/sft model.")
                 _lam_model = base_engine.model
         return _lam_model
 
@@ -203,17 +204,20 @@ def create_app(
             lam_model = get_lam_model(engine)
             from kanha.lam.environment import TaskEnvironment
 
-            # Path traversal prevention: enforce sandbox path inside data/lam/
+            # Path traversal prevention: enforce sandbox path strictly inside data/lam/
+            import datetime
             safe_base = os.path.abspath("data/lam")
             os.makedirs(safe_base, exist_ok=True)
-            requested_path = os.path.abspath(req.tasks_path)
-            if not requested_path.startswith(safe_base):
-                base_name = os.path.basename(req.tasks_path)
-                safe_tasks_path = os.path.join(safe_base, base_name)
-            else:
-                safe_tasks_path = requested_path
+            candidate = os.path.abspath(os.path.join(safe_base, req.tasks_path or "tasks.json"))
+            try:
+                if os.path.commonpath([safe_base, candidate]) != safe_base:
+                    safe_tasks_path = os.path.join(safe_base, os.path.basename(req.tasks_path or "tasks.json"))
+                else:
+                    safe_tasks_path = candidate
+            except ValueError:
+                safe_tasks_path = os.path.join(safe_base, os.path.basename(req.tasks_path or "tasks.json"))
 
-            env = TaskEnvironment(task_store_path=safe_tasks_path)
+            env = TaskEnvironment(task_store_path=safe_tasks_path, reference_date=datetime.date.today().isoformat())
 
             if req.use_langgraph:
                 try:

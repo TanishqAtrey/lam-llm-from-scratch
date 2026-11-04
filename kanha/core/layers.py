@@ -87,7 +87,7 @@ class MultiHeadAttention(nn.Module):
         assert dim % n_heads == 0
         self.n_heads     = n_heads
         self.head_dim    = dim // n_heads
-        self.dropout     = dropout
+        self.dropout     = nn.Dropout(dropout)
         self.max_seq_len = max_seq_len
 
         self.q_proj   = nn.Linear(dim, dim, bias=False)
@@ -142,7 +142,8 @@ class MultiHeadAttention(nn.Module):
                 attn_mask = col_idx <= (row_idx + past_len)
 
         # MPS backend may fail silently with dropout_p > 0 in SDPA
-        dropout_p = self.dropout if self.training and x.device.type != 'mps' else 0.0
+        dp = self.dropout.p if isinstance(self.dropout, nn.Dropout) else float(self.dropout)
+        dropout_p = dp if self.training and x.device.type != 'mps' else 0.0
 
         out = F.scaled_dot_product_attention(
             q, k, v,

@@ -175,11 +175,15 @@ def _find_divergence_pair(
         # If rejected step has empty action, check if retry_history captured it
         if not r_act and retry_history:
             for r in retry_history:
-                if r.get("step_num") == i + 1 and r.get("action"):
+                if (r.get("step_num") == i + 1 or len(retry_history) == 1) and r.get("action"):
                     r_act = r.get("action", "").strip()
                     break
 
-        if c_act and r_act and c_act != r_act:
+        # Fallback: if rejected generated empty action / immediate abort
+        if not r_act and not rejected_steps[i].get("valid", True):
+            r_act = "\n"
+
+        if c_act and (r_act or r_act == "\n") and c_act != r_act:
             prompt = format_step_prompt(goal, chosen_steps[:i])
             c_conf = chosen_confs[i] if i < len(chosen_confs) else 1.0
             r_conf = rejected_confs[i] if i < len(rejected_confs) else 0.0
@@ -192,7 +196,7 @@ def _find_divergence_pair(
         r_act = ""
         r_conf = 0.0
         for r in retry_history:
-            if r.get("step_num") == i + 1 and r.get("action"):
+            if (r.get("step_num") == i + 1 or len(retry_history) == 1) and r.get("action"):
                 r_act = r.get("action", "").strip()
                 r_conf = r.get("confidence", 0.0)
                 break
@@ -200,7 +204,11 @@ def _find_divergence_pair(
             r_act = retry_history[-1].get("action", "").strip()
             r_conf = retry_history[-1].get("confidence", 0.0)
 
-        if c_act and r_act and c_act != r_act:
+        # Fallback: if rejected halted prematurely or generated empty output
+        if not r_act:
+            r_act = "\n"
+
+        if c_act and (r_act or r_act == "\n") and c_act != r_act:
             prompt = format_step_prompt(goal, chosen_steps[:i])
             c_conf = chosen_confs[i] if i < len(chosen_confs) else 1.0
             return prompt, c_act, r_act, c_conf, r_conf

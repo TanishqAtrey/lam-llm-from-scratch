@@ -322,10 +322,14 @@ def download_hh_rlhf():
         prompt = text[:last_asst_idx].strip()
         response = text[last_asst_idx + len("\n\nAssistant:"):].strip()
 
+        # Normalize Human -> User for conversation history consistency with ShortTermMemory
+        prompt = prompt.replace("\n\nHuman:", "\n\nUser:").replace("\nHuman:", "\nUser:")
         if prompt.startswith("Human:"):
-            prompt = prompt[len("Human:"):].strip()
-        elif prompt.startswith("\n\nHuman:"):
-            prompt = prompt[len("\n\nHuman:"):].strip()
+            prompt = "User:" + prompt[len("Human:"):]
+        elif prompt.startswith("\n\nUser:"):
+            prompt = prompt[len("\n\nUser:"):].strip()
+        elif prompt.startswith("User:"):
+            prompt = prompt.strip()
 
         if not prompt or not response:
             return None, None

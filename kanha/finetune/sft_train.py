@@ -69,9 +69,16 @@ class SFTDataset(Dataset):
                     continue
                 obj = json.loads(line)
                 if obj.get("instruction") and obj.get("response"):
-                    self.samples.append(obj)
+                    inst = obj["instruction"]
+                    resp = obj["response"]
+                    full = self.prompt_builder.build_training_pair(inst, resp)
+                    f_ids = self.tokenizer.encode(full, add_bos=True, add_eos=True)
+                    p_prefix = full[:full.rfind("### Response:\n") + len("### Response:\n")] if "### Response:\n" in full else f"### Instruction:\n{inst}\n\n### Response:\n"
+                    p_ids = self.tokenizer.encode(p_prefix, add_bos=True, add_eos=False)
+                    if len(f_ids) <= self.max_len and len(f_ids) > len(p_ids):
+                        self.samples.append(obj)
 
-        log.info(f"Loaded {len(self.samples):,} SFT samples from {data_path}")
+        log.info(f"Loaded {len(self.samples):,} valid SFT samples from {data_path}")
 
     def __len__(self):
         return len(self.samples)
@@ -85,14 +92,19 @@ class SFTDataset(Dataset):
         # This is "### Instruction:\n{instruction}\n\n### Response:\n{response}"
         full_text = self.prompt_builder.build_training_pair(instruction, response)
 
-        # ── Tokenize ──
+        # ── Tokenize without mid-sentence fake EOS truncation ──
         full_ids = self.tokenizer.encode(
-            full_text, add_bos=True, add_eos=True, max_length=self.max_len
+            full_text, add_bos=True, add_eos=True
         )
+        if len(full_ids) > self.max_len:
+            full_ids = full_ids[:self.max_len]
 
         # ── Compute instruction length for loss masking ──
-        # Tokenize just the instruction part (everything before the response)
-        instruction_prefix = f"### Instruction:\n{instruction}\n\n### Response:\n"
+        if "### Response:\n" in full_text:
+            instruction_prefix = full_text[:full_text.rfind("### Response:\n") + len("### Response:\n")]
+        else:
+            instruction_prefix = f"### Instruction:\n{instruction}\n\n### Response:\n"
+
         instruction_ids = self.tokenizer.encode(
             instruction_prefix, add_bos=True, add_eos=False
         )
@@ -108,10 +120,6 @@ class SFTDataset(Dataset):
         for i in range(min(mask_len - 1, len(labels))):
             labels[i] = -100
 
-        # Safety guard: ensure at least one supervised token remains to prevent NaN loss
-        if not any(l != -100 for l in labels) and len(labels) > 0:
-            labels[-1] = full_ids[-1]
-
         return {
             "input_ids": torch.tensor(input_ids, dtype=torch.long),
             "labels": torch.tensor(labels, dtype=torch.long),
@@ -120,6 +128,11 @@ class SFTDataset(Dataset):
 
 def sft_collate_fn(batch, pad_id=0):
     """Dynamically pads each batch to its maximum sequence length instead of fixed 1023."""
+    # Filter out samples with no valid response tokens
+    valid_batch = [x for x in batch if (x["labels"] != -100).any()]
+    if valid_batch:
+        batch = valid_batch
+
     max_len = max(len(x["input_ids"]) for x in batch)
     b_input_ids = []
     b_labels = []
@@ -170,8 +183,14 @@ def sft_train(args):
     """
     device = get_device()
 
-    val_fraction = getattr(args, "val_fraction", None) or getattr(cfg.training, "val_fraction", 0.1)
-    patience = getattr(args, "patience", None) or getattr(cfg.training, "sft_patience", 3)
+    val_fraction = getattr(args, "val_fraction", None)
+    if val_fraction is None:
+        val_fraction = getattr(cfg.training, "val_fraction", 0.1)
+    val_fraction = float(val_fraction)
+
+    patience = getattr(args, "patience", None)
+    if patience is None:
+        patience = getattr(cfg.training, "sft_patience", 3)
 
     # ── Load base model ──
     log.info(f"Loading base model from {args.base_model}")
@@ -217,30 +236,37 @@ def sft_train(args):
 
     log.info(f"Split: {train_size:,} train / {val_size:,} val samples")
 
-    # ── Optimizer ──
-    # CRITICAL: Use a LOW learning rate for SFT to avoid catastrophic forgetting.
-    # For a 40-60M model with full fine-tuning:
-    #   - 1e-5 to 5e-5 is safe
-    #   - 1e-4 is risky (may destroy pretrained weights)
-    #   - 3e-4 or higher WILL cause garbage output
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    # ── Optimizer (separate weight decay for LoRA / biases / norms) ──
+    decay_params = []
+    nodecay_params = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if param.ndim <= 1 or "lora_" in name or "bias" in name or "norm" in name:
+            nodecay_params.append(param)
+        else:
+            decay_params.append(param)
+
+    optim_groups = [
+        {"params": decay_params, "weight_decay": cfg.training.weight_decay},
+        {"params": nodecay_params, "weight_decay": 0.0},
+    ]
     optimizer = torch.optim.AdamW(
-        trainable_params,
+        optim_groups,
         lr=args.lr,
-        weight_decay=cfg.training.weight_decay,
         betas=(0.9, 0.95),
     )
 
     grad_accum_steps = getattr(args, "grad_accum_steps", None) or getattr(cfg.training, "grad_accum_steps", 4)
     grad_accum_steps = max(1, int(grad_accum_steps))
 
-    # ── Warmup + cosine schedule ──
+    # ── Warmup + cosine schedule (starts at step 1 instead of lr=0) ──
     total_steps = math.ceil(len(train_loader) / grad_accum_steps) * args.epochs
     warmup_steps = min(100, max(1, total_steps // 10))
 
     def lr_lambda(step):
         if step < warmup_steps:
-            return step / max(warmup_steps, 1)
+            return (step + 1) / max(warmup_steps, 1)
         progress = (step - warmup_steps) / max(total_steps - warmup_steps, 1)
         progress = min(1.0, max(0.0, progress))
         return 0.1 + 0.9 * (1 + math.cos(math.pi * progress)) / 2
@@ -261,6 +287,7 @@ def sft_train(args):
         epoch_loss = 0
         n_batches = 0
         optimizer.zero_grad()
+        accum_count = 0
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs}")
         for batch_idx, batch in enumerate(pbar):
@@ -275,12 +302,25 @@ def sft_train(args):
             # Backward with gradient accumulation
             loss_scaled = loss / grad_accum_steps
             loss_scaled.backward()
+            accum_count += 1
 
-            if (batch_idx + 1) % grad_accum_steps == 0 or (batch_idx + 1) == len(train_loader):
+            is_accum_boundary = (accum_count % grad_accum_steps == 0)
+            is_last_batch = (batch_idx + 1 == len(train_loader))
+
+            if is_accum_boundary or (is_last_batch and accum_count > 0):
+                # Scale gradient if remainder micro-batch is smaller than grad_accum_steps
+                rem = accum_count % grad_accum_steps
+                if is_last_batch and rem != 0:
+                    scale_factor = grad_accum_steps / rem
+                    for p in model.parameters():
+                        if p.grad is not None:
+                            p.grad.data.mul_(scale_factor)
+
                 torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.training.grad_clip)
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
+                accum_count = 0
 
             epoch_loss += loss.item()
             n_batches += 1

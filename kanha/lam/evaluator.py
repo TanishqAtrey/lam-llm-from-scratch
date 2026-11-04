@@ -139,6 +139,22 @@ class LAMEvaluator:
                 reply_match = True
                 if expected_reply:
                     reply_match = self._check_reply(goal, result.final_message or "", expected_reply)
+
+                if tier in ("tier7", 7):
+                    last_act = result.steps[-1]["action"] if result.steps else ""
+                    if not last_act.startswith("ask("):
+                        reply_match = False
+                elif tier in ("tier8", 8):
+                    reply = (result.final_message or "").lower()
+                    if not any(k in reply for k in ["sorry", "only manage", "cannot", "can't", "only handle"]):
+                        reply_match = False
+                elif tier in ("tier2", "tier5", 2, 5):
+                    query_actions = [
+                        s.get("action", "") for s in result.steps
+                        if any(s.get("action", "").startswith(q) for q in ("count(", "list(", "find("))
+                    ]
+                    if not query_actions or not (result.final_message or "").strip():
+                        reply_match = False
                     
                 side_effect = self._check_side_effects(initial_state, final_tasks, expected_tasks)
 
@@ -243,7 +259,11 @@ class LAMEvaluator:
             if str(expected['contains_title']).lower() not in reply_lower:
                 return False
         if 'contains_phrase' in expected:
-            if str(expected['contains_phrase']).lower() not in reply_lower:
+            phrase = str(expected['contains_phrase']).lower()
+            if phrase == "which":
+                if not any(w in reply_lower for w in ["which", "clarify", "multiple", "specify", "what"]):
+                    return False
+            elif phrase not in reply_lower:
                 return False
         return True
         

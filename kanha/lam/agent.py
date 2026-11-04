@@ -193,19 +193,39 @@ class TaskAgent:
             temperature=temperature,
             top_k=k,
             repetition_penalty=1.0,  # CRITICAL: 1.0 allows copying exact task IDs and titles from context
+            stop_sequences=["\n", "\n### Observation", "### Observation"],
         )
         return self._clean_action(raw), confidence
     
     def _detect_loop(self, history: list[dict]) -> bool:
-        """Returns True if the last 3 actions are identical."""
-        if len(history) < 3:
+        """
+        Detects repetitive action loops:
+        1. 3 identical consecutive actions (A -> A -> A)
+        2. 2-step alternating cycle repeated twice (A -> B -> A -> B)
+        3. 3-step cycle repeated twice (A -> B -> C -> A -> B -> C)
+        """
+        if not history or len(history) < 3:
             return False
-        last_3 = history[-3:]
-        # Ensure they all have 'action' keys
-        for h in last_3:
-            if 'action' not in h:
-                return False
-        return last_3[0]['action'] == last_3[1]['action'] == last_3[2]['action']
+
+        actions = [h.get('action', '').strip() for h in history if isinstance(h, dict) and 'action' in h]
+        if len(actions) < 3:
+            return False
+
+        # 1-step repeat: A -> A -> A
+        if len(actions) >= 3 and actions[-1] and actions[-1] == actions[-2] == actions[-3]:
+            return True
+
+        # 2-step alternating cycle: A -> B -> A -> B
+        if len(actions) >= 4 and actions[-1] and actions[-2]:
+            if actions[-4] == actions[-2] and actions[-3] == actions[-1]:
+                return True
+
+        # 3-step repeating cycle: A -> B -> C -> A -> B -> C
+        if len(actions) >= 6 and all(actions[-i] for i in range(1, 4)):
+            if actions[-6:-3] == actions[-3:]:
+                return True
+
+        return False
     
     def _clean_action(self, raw: str) -> str:
         """Cleans model output to extract just the action call."""

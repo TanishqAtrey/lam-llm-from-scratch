@@ -36,7 +36,7 @@ You say things like *"move the dentist task to Friday"* or *"how many high-prior
 
 | Constraint | Design decision |
 |---|---|
-| 512-token context | Max ~6 steps per task, tiny observations, action set learned in weights |
+| 1024-token context | Max ~6 steps per task, tiny observations, action set learned in weights |
 | ~42M params | Closed action space of 12 actions — needs language→action mapping, not world knowledge |
 | Bad at dates/math | Model emits symbolic values (`due=tomorrow`, `prio=high`); the environment resolves them |
 | Can't handle long lists | Observations show ≤6 rows + `(+N more)`; filters and bulk actions narrow queries |
@@ -119,21 +119,24 @@ python main.py dpo --base_model models/finetuned/sft_final.pt --data data/proces
 # Generate synthetic training data (100k trajectories) and split into train/val/test
 python main.py lam-generate --output data/lam/trajectories.jsonl --num 100000 --split
 
-# SFT on action sequences
+# SFT on action sequences (outputs models/lam/lam_final.pt)
 python main.py lam-train --data data/lam/train.jsonl --output models/lam/
 
-# DPO on action preferences (optional)
-python main.py lam-dpo --data data/lam/dpo.jsonl --model models/lam/lam_sft.pt
+# Auto-mine DPO pairs from agent trajectories (using train split to avoid test contamination)
+python main.py mine-dpo --model models/lam/lam_final.pt --eval_data data/lam/train.jsonl --output data/lam/dpo_pairs.jsonl
+
+# DPO on action preferences (optional, outputs models/lam/dpo_final.pt)
+python main.py lam-dpo --data data/lam/dpo_pairs.jsonl --base_model models/lam/lam_final.pt
 ```
 
 ### 4. Use the LAM agent
 
 ```bash
 # Base agent (zero dependencies beyond PyTorch)
-python main.py agent --model models/lam/lam_final.pt
+python main.py agent --model models/lam/dpo_final.pt  # or models/lam/lam_final.pt
 
 # LangGraph agent
-python main.py agent --model models/lam/lam_final.pt --langgraph
+python main.py agent --model models/lam/dpo_final.pt --langgraph
 ```
 
 ```
@@ -173,7 +176,7 @@ curl -X POST http://localhost:8000/agent \
 ### 6. Evaluate
 
 ```bash
-python main.py lam-eval --model models/lam/lam_final.pt --data data/lam/test.jsonl
+python main.py lam-eval --model models/lam/dpo_final.pt --data data/lam/test.jsonl  # or models/lam/lam_final.pt
 ```
 
 ---

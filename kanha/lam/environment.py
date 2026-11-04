@@ -11,8 +11,6 @@ class TaskEnvironment:
             lam_cfg = cfg.lam
             if task_store_path is None:
                 task_store_path = getattr(lam_cfg, 'task_store_path', 'data/lam/tasks.json')
-            if reference_date is None:
-                reference_date = getattr(lam_cfg, 'reference_date', None)
         except Exception:
             if task_store_path is None:
                 task_store_path = 'data/lam/tasks.json'

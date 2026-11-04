@@ -333,3 +333,118 @@ def test_dynamic_padding_collate():
     assert collated["input_ids"][0, -1].item() == 0
     assert collated["labels"][0, -1].item() == -100
 
+
+# ── New Targeted Audit Fixes Tests ──────────────────────────────────────────
+
+def test_multihead_attention_dropout_disabled():
+    """Verify MultiHeadAttention attention dropout is disabled by disable_dropout."""
+    model = KanhaModel(vocab_size=100, dim=32, n_layers=2, n_heads=2, ff_dim=64, max_seq_len=32, dropout=0.2)
+    # Check that attention layers have dropout > 0
+    attn_dropouts = [layer.attn.dropout for layer in model.layers]
+    for d in attn_dropouts:
+        assert isinstance(d, torch.nn.Dropout)
+        assert d.p == 0.2
+
+    disable_dropout(model)
+    for d in attn_dropouts:
+        assert d.p == 0.0, "Attention dropout must be set to 0.0 after disable_dropout"
+
+
+def test_lora_disable_adapter():
+    """Verify LoRAModel can dynamically disable adapter for reference pass."""
+    from kanha.core.lora import LoRAModel, LoRALinear
+    model = KanhaModel(vocab_size=100, dim=32, n_layers=2, n_heads=2, ff_dim=64, max_seq_len=32, dropout=0.0)
+    lora_model = LoRAModel(model, rank=4, alpha=8.0, dropout=0.0, target_modules=["q_proj", "v_proj"])
+    
+    x = torch.randint(0, 100, (1, 8))
+    # Base model output
+    with torch.no_grad():
+        with lora_model.disable_adapter():
+            base_logits, _, _ = lora_model(x)
+        
+        # When adapter is enabled with non-zero weights
+        for m in lora_model.modules():
+            if isinstance(m, LoRALinear):
+                m.lora_B.data.fill_(0.5)
+        
+        adapted_logits, _, _ = lora_model(x)
+        assert not torch.allclose(base_logits, adapted_logits), "Adapted logits should differ from base logits"
+        
+        with lora_model.disable_adapter():
+            disabled_logits, _, _ = lora_model(x)
+        assert torch.allclose(base_logits, disabled_logits), "Disabled adapter must exactly match base model"
+
+
+def test_detect_loop_alternating_cycles():
+    """Verify TaskAgent detects 2-step alternating cycles (A -> B -> A -> B) and 3-step loops."""
+    from kanha.lam.agent import TaskAgent
+    from unittest.mock import MagicMock
+    agent = TaskAgent(MagicMock(), MagicMock(), MagicMock())
+    
+    # 1-step repeat: A -> A -> A
+    h1 = [{'action': 'list()'}, {'action': 'list()'}, {'action': 'list()'}]
+    assert agent._detect_loop(h1), "Should detect 1-step repeat"
+
+    # Non-loop
+    h_ok = [{'action': 'list()'}, {'action': 'add(title="buy")'}, {'action': 'finish()'}]
+    assert not agent._detect_loop(h_ok), "Should not flag non-loop"
+
+    # 2-step alternating: A -> B -> A -> B
+    h_alt = [
+        {'action': 'list()'},
+        {'action': 'get(id=1)'},
+        {'action': 'list()'},
+        {'action': 'get(id=1)'},
+    ]
+    assert agent._detect_loop(h_alt), "Should detect 2-step alternating cycle (A -> B -> A -> B)"
+
+    # 3-step cycle: A -> B -> C -> A -> B -> C
+    h_cycle3 = [
+        {'action': 'list()'},
+        {'action': 'get(id=1)'},
+        {'action': 'search(q="x")'},
+        {'action': 'list()'},
+        {'action': 'get(id=1)'},
+        {'action': 'search(q="x")'},
+    ]
+    assert agent._detect_loop(h_cycle3), "Should detect 3-step cycle (A -> B -> C -> A -> B -> C)"
+
+
+def test_multiturn_dialogue_parsing():
+    """Verify PromptBuilder parses multi-turn HH-RLHF dialogue into Conversation History."""
+    from kanha.prompting.builder import PromptBuilder
+    pb = PromptBuilder(include_rules=False)
+    
+    hh_text = "Human: hello\n\nAssistant: hi there\n\nHuman: what is 2+2?"
+    history, inst = pb.parse_dialogue(hh_text)
+    assert history == "User: hello\nAssistant: hi there"
+    assert inst == "what is 2+2?"
+
+    pair = pb.build_training_pair(hh_text, "4")
+    assert "### Conversation History:\nUser: hello\nAssistant: hi there" in pair
+    assert "### Instruction:\nwhat is 2+2?" in pair
+    assert "### Response:\n4" in pair
+
+
+def test_mine_dpo_pairs_empty_divergence():
+    """Verify _find_divergence_pair preserves empty/aborted actions as negative samples."""
+    from scripts.mine_dpo_pairs import _find_divergence_pair
+    
+    chosen_steps = [{'action': 'add(title="milk")'}]
+    rejected_steps = [{'action': '', 'valid': False}]
+    retry_history = [{'action': '', 'confidence': 0.0, 'step_num': 1}]
+
+    res = _find_divergence_pair(
+        goal="Add milk",
+        chosen_steps=chosen_steps,
+        rejected_steps=rejected_steps,
+        chosen_confs=[0.9],
+        rejected_confs=[0.0],
+        retry_history=retry_history,
+    )
+    assert res is not None, "Divergence pair must not be dropped for empty/aborted action"
+    prompt, chosen, rejected, c_conf, r_conf = res
+    assert chosen == 'add(title="milk")'
+    assert rejected == '\n'
+
+

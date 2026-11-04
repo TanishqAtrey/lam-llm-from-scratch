@@ -15,6 +15,10 @@ import dataclasses
 import os
 import sys
 
+from kanha.utils.logging import get_logger
+
+log = get_logger("main")
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -81,6 +85,7 @@ def main():
     dpo_p.add_argument("--output",     default="models/finetuned/")
     dpo_p.add_argument("--epochs",     type=int, default=1)
     dpo_p.add_argument("--batch_size", type=int, default=1)
+    dpo_p.add_argument("--grad_accum_steps", type=int, default=4, help="Gradient accumulation steps (default 4)")
     dpo_p.add_argument("--lr",         type=float, default=1e-6)
     dpo_p.add_argument("--beta",       type=float, default=0.1)
     dpo_p.add_argument("--length_norm", action="store_true", help="Normalize sequence log probs by length")
@@ -90,7 +95,8 @@ def main():
     # ── api ───────────────────────────────────────────────────────────────
     api_p = sub.add_parser("api", help="Start FastAPI server")
     api_p.add_argument("--model", required=True)
-    api_p.add_argument("--host",  default="0.0.0.0")
+    api_p.add_argument("--lam_model", default=None, help="Path to dedicated LAM model checkpoint")
+    api_p.add_argument("--host",  default="127.0.0.1")
     api_p.add_argument("--port",  type=int, default=8000)
 
     # ── lam-generate ──────────────────────────────────────────────────────
@@ -120,12 +126,13 @@ def main():
 
     # ── lam-dpo ───────────────────────────────────────────────────────────
     lamdpo_p = sub.add_parser("lam-dpo", help="DPO alignment for LAM")
-    lamdpo_p.add_argument("--base_model", "--model", dest="base_model", default="models/lam/lam_sft.pt",
-                          help="Path to base SFT model for DPO (default: models/lam/lam_sft.pt)")
+    lamdpo_p.add_argument("--base_model", "--model", dest="base_model", default="models/lam/lam_final.pt",
+                          help="Path to base SFT model for DPO (default: models/lam/lam_final.pt)")
     lamdpo_p.add_argument("--data",       required=True)
     lamdpo_p.add_argument("--output",     default="models/lam/")
     lamdpo_p.add_argument("--epochs",     type=int, default=1)
     lamdpo_p.add_argument("--batch_size", type=int, default=1)
+    lamdpo_p.add_argument("--grad_accum_steps", type=int, default=4, help="Gradient accumulation steps (default 4)")
     lamdpo_p.add_argument("--lr",         type=float, default=1e-6)
     lamdpo_p.add_argument("--beta",       type=float, default=0.1)
     lamdpo_p.add_argument("--length_norm", action="store_true", help="Normalize sequence log probs by length")
@@ -148,8 +155,8 @@ def main():
     # ── mine-dpo ──────────────────────────────────────────────────────────
     mine_p = sub.add_parser("mine-dpo", help="Auto-mine DPO pairs from agent trajectories")
     mine_p.add_argument("--model",     required=True)
-    mine_p.add_argument("--eval_data", required=True,
-                        help="JSONL with goals, worlds, and oracle steps")
+    mine_p.add_argument("--eval_data", default="data/lam/train.jsonl",
+                        help="JSONL with goals, worlds, and oracle steps (use train.jsonl to avoid test contamination)")
     mine_p.add_argument("--output",    default="data/lam/dpo_pairs.jsonl")
     mine_p.add_argument("--max_goals", type=int, default=500,
                         help="Max goals to evaluate (default 500)")
@@ -202,6 +209,13 @@ def main():
     elif args.command == "lam-dpo":
         from kanha.finetune.dpo_train import dpo_train
         args.lam_mode = True
+        if not os.path.exists(args.base_model):
+            base_dir = os.path.dirname(args.base_model) or "models/lam"
+            alt_name = "lam_sft.pt" if args.base_model.endswith("lam_final.pt") else "lam_final.pt"
+            alt = os.path.join(base_dir, alt_name)
+            if os.path.exists(alt):
+                log.info(f"Base model '{args.base_model}' not found, falling back to existing '{alt}'")
+                args.base_model = alt
         dpo_train(args)
 
     elif args.command == "agent":
@@ -245,7 +259,7 @@ def _start_api(args):
     try:
         import uvicorn
         from api import create_app
-        app = create_app(model_path=args.model)
+        app = create_app(model_path=args.model, lam_model_path=getattr(args, "lam_model", None))
         uvicorn.run(app, host=args.host, port=args.port)
     except ImportError:
         print("FastAPI/uvicorn not installed. Run: pip install fastapi uvicorn")

@@ -288,13 +288,14 @@ def test_agent_retry_top_k_relaxation():
 # ── 6. DPO Dataset Guard Test ────────────────────────────────────────────────
 
 def test_dpo_dataset_label_guard(tmp_path):
-    """Verify LAMDPODataset guarantees at least one supervised token in labels."""
+    """Verify LAMDPODataset masks prompt tokens and supervises response tokens."""
     from kanha.lam.trajectory import LAMDPODataset
     from unittest.mock import MagicMock
 
     mock_tok = MagicMock()
     mock_tok.PAD_ID = 0
-    mock_tok.encode.return_value = [10, 20, 30]
+    # Prompt is 2 tokens; prompt+response is 4 tokens
+    mock_tok.encode.side_effect = lambda text, **kw: [10, 20] if ("A1" not in text and "A2" not in text) else [10, 20, 30, 40]
 
     # Create dummy dpo jsonl file
     dpo_file = tmp_path / "dpo_sample.jsonl"
@@ -303,9 +304,11 @@ def test_dpo_dataset_label_guard(tmp_path):
 
     dataset = LAMDPODataset(str(dpo_file), mock_tok, max_len=16)
     sample = dataset[0]
-    # Check that chosen_labels has at least one supervised token != -100
     chosen_labels = sample["chosen_labels"]
+    # Check that chosen_labels has supervised token != -100 on response
     assert any(l != -100 for l in chosen_labels), "DPO sample must have at least one non-masked label"
+    # Check prompt tokens are masked
+    assert chosen_labels[0] == -100, "Prompt token should be masked with -100"
 
 
 # ── 7. Token Lengths Checker Test ─────────────────────────────────────────────
@@ -458,6 +461,95 @@ def test_scheduler_resumption_initial_lr():
     )
     # When last_epoch=34999 is passed, LambdaLR.__init__ calls step(), advancing last_epoch to 35000
     assert sched.last_epoch == 35000
+
+
+# ── 8. Trajectory, LoRA & Environment Fixes Tests ──────────────────────────────
+
+def test_lam_dpo_collate_fn_dynamic_padding():
+    """Verify lam_dpo_collate_fn dynamically pads to max batch length."""
+    from kanha.lam.trajectory import lam_dpo_collate_fn
+
+    b1 = {
+        "chosen_input_ids": torch.tensor([1, 2, 3]),
+        "chosen_labels": torch.tensor([-100, 2, 3]),
+        "rejected_input_ids": torch.tensor([1, 4]),
+        "rejected_labels": torch.tensor([-100, 4]),
+    }
+    b2 = {
+        "chosen_input_ids": torch.tensor([5, 6, 7, 8, 9]),
+        "chosen_labels": torch.tensor([-100, -100, 7, 8, 9]),
+        "rejected_input_ids": torch.tensor([5, 6, 10]),
+        "rejected_labels": torch.tensor([-100, -100, 10]),
+    }
+    batch = lam_dpo_collate_fn([b1, b2], pad_id=0)
+    assert batch["chosen_input_ids"].shape == (2, 5)
+    assert batch["rejected_input_ids"].shape == (2, 5)
+    assert batch["chosen_labels"].shape == (2, 5)
+    assert batch["rejected_labels"].shape == (2, 5)
+
+
+def test_lam_dpo_missing_prompt_and_goal(tmp_path):
+    """Verify LAMDPODataset gracefully handles missing prompt and goal without crashing."""
+    from kanha.lam.trajectory import LAMDPODataset
+    from unittest.mock import MagicMock
+
+    mock_tok = MagicMock()
+    mock_tok.PAD_ID = 0
+    mock_tok.encode.return_value = [1, 2, 3]
+
+    dpo_file = tmp_path / "dpo_empty.jsonl"
+    with open(dpo_file, "w") as f:
+        f.write('{"chosen": "act1", "rejected": "act2"}\n')
+
+    dataset = LAMDPODataset(str(dpo_file), mock_tok, max_len=16)
+    item = dataset[0]
+    assert item["chosen_input_ids"] is not None
+    assert item["rejected_input_ids"] is not None
+
+
+def test_oracle_remove_word_boundary():
+    """Verify Oracle does not misinterpret 'remove' as 'move'."""
+    from kanha.lam.data.oracle import Oracle
+    from kanha.lam.environment import TaskEnvironment
+    import tempfile
+
+    oracle = Oracle()
+    with tempfile.NamedTemporaryFile(suffix=".json") as f:
+        env = TaskEnvironment(task_store_path=f.name, auto_save=False)
+        env.reset(initial_tasks=[{"title": "buy milk", "due": "today", "prio": "med", "tag": "errands"}])
+        info = {
+            "solver": "_solve_lookup_then_act",
+            "goal": "remove buy milk from my list",
+            "slot_values": {"query": "buy milk"},
+            "query_val": "buy milk",
+            "tier": 3,
+        }
+        steps = oracle.solve(info, env)
+        actions = [s[0] for s in steps]
+        assert any("delete(id=" in a for a in actions), f"Expected delete action, got: {actions}"
+        assert not any("field=due" in a for a in actions), f"Should not reschedule due date: {actions}"
+
+
+def test_load_lora_key_inspection(caplog):
+    """Verify load_lora logs warnings on unexpected keys and missing LoRA keys."""
+    from kanha.core.lora import LoRAModel
+    import logging
+    import tempfile
+
+    base_model = torch.nn.Sequential(torch.nn.Linear(8, 8))
+    lora = LoRAModel(base_model, rank=4, alpha=8.0, target_modules=["0"])
+
+    # Save a corrupted checkpoint with an unexpected key and missing adapter key
+    with tempfile.NamedTemporaryFile(suffix=".pt") as f:
+        fake_state = {"unexpected_key": torch.zeros(4)}
+        torch.save({"lora_state": fake_state}, f.name)
+
+        with caplog.at_level(logging.WARNING):
+            lora.load_lora(f.name)
+
+        assert any("Unexpected keys" in record.message for record in caplog.records)
+        assert any("Missing LoRA adapter keys" in record.message for record in caplog.records)
+
 
 
 

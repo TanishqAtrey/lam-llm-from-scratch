@@ -145,8 +145,12 @@ def train(args):
 
     val_fraction = getattr(args, "val_fraction", None)
     if val_fraction is None:
-        val_fraction = getattr(tc, "val_fraction", 0.1)
-    patience = getattr(args, "patience", None) or getattr(tc, "patience", 5)
+        val_fraction = getattr(tc, "val_fraction", 0.05)
+    val_fraction = float(val_fraction)
+    patience = getattr(args, "patience", None)
+    if patience is None:
+        patience = getattr(tc, "patience", 10)
+    patience = int(patience)
     eval_every = getattr(args, "eval_every", None) or getattr(tc, "eval_every", None) or getattr(tc, "save_every", 5000)
 
     # ── Datasets (train / val split) ──

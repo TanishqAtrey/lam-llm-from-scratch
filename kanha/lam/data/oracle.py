@@ -142,7 +142,7 @@ class Oracle:
             elif "tag" in raw_tmpl:
                 tag = slots.get("tag", "home")
                 act2 = f'edit(id={task_id}, field=tag, value={tag})'
-            elif "move" in raw_tmpl or "reschedule" in raw_tmpl:
+            elif bool(re.search(r"\bmove\b", raw_tmpl)) or "reschedule" in raw_tmpl:
                 due = info.get("due_phrase_val", "today")
                 act2 = f'edit(id={task_id}, field=due, value={due})'
             elif "prio" in raw_tmpl or "change" in raw_tmpl or "set" in raw_tmpl:
@@ -160,7 +160,7 @@ class Oracle:
             act2 = f"done(id={task_id})"
         elif "delete" in goal or "remove" in goal:
             act2 = f"delete(id={task_id})"
-        elif "move" in goal or "reschedule" in goal:
+        elif bool(re.search(r"\bmove\b", goal)) or "reschedule" in goal:
             due = info.get("due_phrase_val", "today")
             act2 = f'edit(id={task_id}, field=due, value={due})'
         elif "prio_phrase_val" in info or "prio_val_val" in info or "priority" in goal or (("change" in goal or "set" in goal) and any(p in goal for p in ["low", "med", "high", "prio"])):

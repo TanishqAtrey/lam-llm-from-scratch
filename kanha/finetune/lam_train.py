@@ -21,6 +21,7 @@ Run:
 import os
 import json
 import math
+from typing import Union, List, Tuple, Optional
 import torch
 import torch.utils.data
 from torch.utils.data import Dataset, DataLoader
@@ -69,7 +70,12 @@ class LAMSFTDataset(Dataset):
                 prompt = build_lam_step_prompt(goal, history)
                 response = step.get("action", "")
                 if response:
-                    self.examples.append((prompt, response))
+                    # Filter out oversized examples to prevent mid-action truncation
+                    full_text = prompt + response
+                    f_ids = self.tokenizer.encode(full_text, add_bos=True, add_eos=True)
+                    p_ids = self.tokenizer.encode(prompt, add_bos=True, add_eos=False)
+                    if len(f_ids) <= self.max_len and len(f_ids) > len(p_ids):
+                        self.examples.append((prompt, response))
 
         src_desc = f"{len(trajectories)} trajectories" if isinstance(data, list) else data
         log.info(f"Loaded {len(self.examples):,} LAM training steps from {src_desc}")
@@ -83,10 +89,12 @@ class LAMSFTDataset(Dataset):
         # Build full text: prompt + response
         full_text = prompt + response
 
-        # Tokenise
+        # Tokenise without synthesizing fake EOS on truncated actions
         full_ids = self.tokenizer.encode(
-            full_text, add_bos=True, add_eos=True, max_length=self.max_len
+            full_text, add_bos=True, add_eos=True
         )
+        if len(full_ids) > self.max_len:
+            full_ids = full_ids[:self.max_len]
 
         # Compute prompt length for loss masking
         prompt_ids = self.tokenizer.encode(
@@ -102,10 +110,6 @@ class LAMSFTDataset(Dataset):
         for i in range(min(mask_len - 1, len(labels))):
             labels[i] = -100
 
-        # Safety guard: ensure at least one supervised token remains to prevent NaN loss
-        if not any(l != -100 for l in labels) and len(labels) > 0:
-            labels[-1] = full_ids[-1]
-
         return {
             "input_ids": torch.tensor(input_ids, dtype=torch.long),
             "labels": torch.tensor(labels, dtype=torch.long),
@@ -114,6 +118,10 @@ class LAMSFTDataset(Dataset):
 
 def lam_collate_fn(batch, pad_id=0):
     """Dynamically pads each batch to its maximum sequence length instead of fixed 1023."""
+    valid_batch = [x for x in batch if (x["labels"] != -100).any()]
+    if valid_batch:
+        batch = valid_batch
+
     max_len = max(len(x["input_ids"]) for x in batch)
     b_input_ids = []
     b_labels = []
@@ -164,8 +172,14 @@ def lam_sft_train(args):
     """
     device = get_device()
 
-    val_fraction = getattr(args, "val_fraction", None) or getattr(cfg.training, "val_fraction", 0.1)
-    patience = getattr(args, "patience", None) or getattr(cfg.training, "sft_patience", 3)
+    val_fraction = getattr(args, "val_fraction", None)
+    if val_fraction is None:
+        val_fraction = getattr(cfg.training, "val_fraction", 0.1)
+    val_fraction = float(val_fraction)
+
+    patience = getattr(args, "patience", None)
+    if patience is None:
+        patience = getattr(cfg.training, "sft_patience", 3)
 
     # ── Load base model ──
     log.info(f"Loading base model from {args.base_model}")
@@ -193,9 +207,15 @@ def lam_sft_train(args):
     max_seq_len = getattr(cfg.model, "max_seq_len", 512)
     val_data = getattr(args, "val_data", None)
     if not val_data:
-        candidate_val = os.path.join(os.path.dirname(args.data), "val.jsonl")
-        if os.path.exists(candidate_val) and candidate_val != args.data:
-            val_data = candidate_val
+        candidates = [
+            os.path.join(os.path.dirname(args.data), "val.jsonl"),
+            args.data.replace("_train.jsonl", "_val.jsonl"),
+            os.path.join(os.path.dirname(args.data), "trajectories_val.jsonl"),
+        ]
+        for c in candidates:
+            if os.path.exists(c) and c != args.data:
+                val_data = c
+                break
 
     if val_data and os.path.exists(val_data):
         log.info(f"Using separate trajectory validation file: {val_data}")
@@ -229,27 +249,41 @@ def lam_sft_train(args):
         collate_fn=lam_collate_fn,
     )
 
-    log.info(f"Split: {len(train_dataset):,} train / {len(val_dataset):,} val steps")
+    train_size = len(train_dataset)
+    val_size = len(val_dataset)
+    log.info(f"Split: {train_size:,} train / {val_size:,} val steps")
 
-    # ── Optimizer (same safe defaults as sft_train) ──
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    # ── Optimizer (separate weight decay for LoRA / biases / norms) ──
+    decay_params = []
+    nodecay_params = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if param.ndim <= 1 or "lora_" in name or "bias" in name or "norm" in name:
+            nodecay_params.append(param)
+        else:
+            decay_params.append(param)
+
+    optim_groups = [
+        {"params": decay_params, "weight_decay": cfg.training.weight_decay},
+        {"params": nodecay_params, "weight_decay": 0.0},
+    ]
     optimizer = torch.optim.AdamW(
-        trainable_params,
+        optim_groups,
         lr=args.lr,
-        weight_decay=cfg.training.weight_decay,
         betas=(0.9, 0.95),
     )
 
     grad_accum_steps = getattr(args, "grad_accum_steps", None) or getattr(cfg.training, "grad_accum_steps", 4)
     grad_accum_steps = max(1, int(grad_accum_steps))
 
-    # ── Warmup + cosine schedule ──
+    # ── Warmup + cosine schedule (starts at step 1 instead of lr=0) ──
     total_steps = math.ceil(len(train_loader) / grad_accum_steps) * args.epochs
     warmup_steps = min(100, max(1, total_steps // 10))
 
     def lr_lambda(step):
         if step < warmup_steps:
-            return step / max(warmup_steps, 1)
+            return (step + 1) / max(warmup_steps, 1)
         progress = (step - warmup_steps) / max(total_steps - warmup_steps, 1)
         progress = min(1.0, max(0.0, progress))
         return 0.1 + 0.9 * (1 + math.cos(math.pi * progress)) / 2
@@ -272,6 +306,7 @@ def lam_sft_train(args):
         epoch_loss = 0.0
         n_batches = 0
         optimizer.zero_grad()
+        accum_count = 0
 
         pbar = tqdm(train_loader, desc=f"LAM Epoch {epoch+1}/{args.epochs}")
         for batch_idx, batch in enumerate(pbar):
@@ -286,12 +321,25 @@ def lam_sft_train(args):
             # Backward with gradient accumulation
             loss_scaled = loss / grad_accum_steps
             loss_scaled.backward()
+            accum_count += 1
 
-            if (batch_idx + 1) % grad_accum_steps == 0 or (batch_idx + 1) == len(train_loader):
+            is_accum_boundary = (accum_count % grad_accum_steps == 0)
+            is_last_batch = (batch_idx + 1 == len(train_loader))
+
+            if is_accum_boundary or (is_last_batch and accum_count > 0):
+                # Scale gradient if remainder micro-batch is smaller than grad_accum_steps
+                rem = accum_count % grad_accum_steps
+                if is_last_batch and rem != 0:
+                    scale_factor = grad_accum_steps / rem
+                    for p in model.parameters():
+                        if p.grad is not None:
+                            p.grad.data.mul_(scale_factor)
+
                 torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.training.grad_clip)
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
+                accum_count = 0
 
             epoch_loss += loss.item()
             n_batches += 1

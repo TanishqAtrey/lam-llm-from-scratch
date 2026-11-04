@@ -114,12 +114,68 @@ class PromptBuilder:
 
         return "".join(parts)
 
-    def build_training_pair(self, instruction: str, response: str) -> str:
+    def build_training_pair(self, instruction: str, response: str, memory_context: str = "") -> str:
         """
         Builds the full training sequence (instruction + response).
-        Used by sft_train.py to ensure template consistency.
+        If memory_context is provided (or if instruction contains multi-turn dialogue),
+        it formats with '### Conversation History:' to ensure 100% inference template match.
+        Used by sft_train.py and dpo_train.py to ensure template consistency.
         """
+        if not memory_context and ("Assistant:" in instruction or "Human:" in instruction):
+            history, inst = self.parse_dialogue(instruction)
+            if history:
+                memory_context, instruction = history, inst
+
+        if memory_context:
+            return f"### Conversation History:\n{memory_context}\n\n### Instruction:\n{instruction}\n\n### Response:\n{response}"
         return FULL_TEMPLATE.format(instruction=instruction, response=response)
+
+    @staticmethod
+    def parse_dialogue(text: str) -> tuple[str, str]:
+        """
+        Parses multi-turn dialogue into (memory_context, last_instruction).
+        Handles formats like:
+          Human: ... \\n\\nAssistant: ... \\n\\nHuman: ...
+          User: ... \\n\\nAssistant: ... \\n\\nUser: ...
+        If single turn or no dialogue markers, returns ('', clean_text).
+        """
+        import re
+        text = text.strip()
+        has_assistant = "Assistant:" in text or "assistant:" in text
+        has_human = "Human:" in text or "User:" in text or "human:" in text or "user:" in text
+        if not (has_assistant and has_human):
+            clean = text
+            if clean.lower().startswith("human:"):
+                clean = clean[6:].strip()
+            elif clean.lower().startswith("user:"):
+                clean = clean[5:].strip()
+            return "", clean
+
+        turns = re.split(r'\n*(Human:|User:|Assistant:|human:|user:|assistant:)\s*', text)
+        pairs = []
+        i = 1 if (len(turns) > 1 and turns[0].strip() == '') else 0
+        while i < len(turns) - 1:
+            role = turns[i].rstrip(':').strip().lower()
+            content = turns[i+1].strip()
+            if role in ("human", "user"):
+                pairs.append(("User", content))
+            elif role == "assistant":
+                pairs.append(("Assistant", content))
+            i += 2
+
+        if not pairs:
+            return "", text
+
+        # Find the last User turn for instruction; all prior turns become history
+        user_indices = [idx for idx, p in enumerate(pairs) if p[0] == "User"]
+        if user_indices:
+            last_u_idx = user_indices[-1]
+            last_inst = pairs[last_u_idx][1]
+            history_pairs = pairs[:last_u_idx]
+            history_str = "\n".join(f"{role}: {content}" for role, content in history_pairs)
+            return history_str, last_inst
+
+        return "", text
 
     @staticmethod
     def _truncate_context(chunks: List[str], max_chars: int) -> str:

@@ -125,6 +125,18 @@ class InferenceEngine:
         Streaming generator that yields response tokens and tool outputs as they arrive.
         Updates conversation memory upon completion.
         """
+        # 0. Safety filter on user prompt before generation begins
+        try:
+            from kanha.alignment.filters import is_safe_prompt
+            safe, refusal_msg = is_safe_prompt(user_message)
+            if not safe:
+                self.memory.add("user", user_message)
+                self.memory.add("assistant", refusal_msg)
+                yield refusal_msg
+                return
+        except ImportError:
+            pass
+
         # 1. RAG retrieval
         retrieved_chunks = None
         if self.use_rag and self.retriever:
@@ -232,6 +244,19 @@ class InferenceEngine:
         Returns:
             The model's response string
         """
+        # 0. Safety filter on user prompt before generation begins
+        try:
+            from kanha.alignment.filters import is_safe_prompt
+            safe, refusal_msg = is_safe_prompt(user_message)
+            if not safe:
+                self.memory.add("user", user_message)
+                self.memory.add("assistant", refusal_msg)
+                if stream:
+                    print(refusal_msg)
+                return refusal_msg
+        except ImportError:
+            pass
+
         if stream:
             response_parts = []
             for chunk in self.chat_stream(user_message):

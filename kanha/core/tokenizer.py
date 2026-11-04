@@ -73,11 +73,7 @@ class KanhaTokenizer:
             ids = ids + [self.EOS_ID]
 
         if max_length is not None and len(ids) > max_length:
-            # Preserve EOS if it was added — truncate content, not the end marker
-            if add_eos:
-                ids = ids[:max_length - 1] + [self.EOS_ID]
-            else:
-                ids = ids[:max_length]
+            ids = ids[:max_length]
 
         return ids
 
@@ -180,5 +176,7 @@ def train_tokenizer(
         byte_fallback=True,                # Eliminates <unk> by falling back to raw UTF-8 byte tokens
         split_digits=True,                 # Preserves numerical arithmetic precision
         allow_whitespace_only_pieces=True, # Supports tab/space indentation tokens
+        split_by_whitespace=False,         # Prevents stripping standalone newlines and whitespace
+        hard_vocab_limit=False,            # Allows training even if sample text has fewer unique tokens than vocab
     )
     log.info(f"Tokenizer saved to {model_prefix}.model")

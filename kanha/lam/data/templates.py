@@ -219,11 +219,35 @@ def sample_goal(tier: str, world, rng: random.Random) -> tuple[str, dict]:
             info[f"{slot}_val"] = base
         elif slot == 'ambiguous_query':
             if active_tasks and len(active_tasks) >= 2:
-                task = rng.choice(active_tasks)
-                # Use first word of title as the ambiguous query
-                parts = task.title.split()
-                slot_values[slot] = parts[0] if parts else task.title
-                info[f"{slot}_val"] = task.title
+                # Ambiguous queries MUST match >= 2 active tasks
+                candidate_matches = []
+                title_counts = {}
+                for t in active_tasks:
+                    title_counts[t.title] = title_counts.get(t.title, 0) + 1
+                dup_titles = [t for t, c in title_counts.items() if c >= 2]
+                if dup_titles:
+                    candidate_matches.extend(dup_titles)
+
+                word_counts = {}
+                for t in active_tasks:
+                    for w in set(t.title.split()):
+                        w_clean = w.strip().lower()
+                        if len(w_clean) >= 3 and w_clean not in {
+                            "the", "to", "a", "an", "and", "for", "with", "of", "in", "on", "at", "from", "my", "it", "out"
+                        }:
+                            word_counts[w] = word_counts.get(w, 0) + 1
+                dup_words = [w for w, c in word_counts.items() if c >= 2]
+                if dup_words:
+                    candidate_matches.extend(dup_words)
+
+                if candidate_matches:
+                    chosen_q = rng.choice(candidate_matches)
+                    slot_values[slot] = chosen_q
+                    info[f"{slot}_val"] = chosen_q
+                else:
+                    task = rng.choice(active_tasks)
+                    slot_values[slot] = task.title
+                    info[f"{slot}_val"] = task.title
             else:
                 slot_values[slot] = rng.choice(pool)
         elif slot == 'query' and template.get('requires_existing'):
@@ -236,7 +260,15 @@ def sample_goal(tier: str, world, rng: random.Random) -> tuple[str, dict]:
                         "the", "to", "a", "an", "and", "for", "with", "of", "in", "on", "at", "from", "my", "it", "out"
                     }
                 ]
-                slot_values[slot] = rng.choice(meaningful_parts) if meaningful_parts else (parts[0] if parts else task.title)
+                # In tier 3, query must uniquely identify exactly ONE task
+                unique_words = [
+                    w for w in meaningful_parts
+                    if sum(1 for ot in active_tasks if w.lower() in ot.title.lower()) == 1
+                ]
+                if unique_words:
+                    slot_values[slot] = rng.choice(unique_words)
+                else:
+                    slot_values[slot] = task.title
                 info[f"{slot}_val"] = task.title
                 info["target_id"] = task.id
             else:

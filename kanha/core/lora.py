@@ -4,6 +4,7 @@ LoRA (Low-Rank Adaptation) for parameter-efficient fine-tuning.
 """
 
 import math
+from contextlib import contextmanager
 import torch
 import torch.nn as nn
 from typing import List, Optional
@@ -30,10 +31,13 @@ class LoRALinear(nn.Module):
         self.lora_A = nn.Parameter(torch.empty(rank, d_in, device=device))
         self.lora_B = nn.Parameter(torch.zeros(d_out, rank, device=device))
         self.lora_dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
+        self.adapter_enabled = True
         nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         base_out = self.linear(x)
+        if not getattr(self, "adapter_enabled", True) or self.scaling == 0.0:
+            return base_out
         lora_x = self.lora_dropout(x).to(self.lora_A.dtype)
         lora_out = (lora_x @ self.lora_A.T) @ self.lora_B.T
         return base_out + (lora_out * self.scaling).to(x.dtype)
@@ -124,6 +128,27 @@ class LoRAModel(nn.Module):
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)
 
+    @contextmanager
+    def disable_adapter(self):
+        """Context manager that temporarily disables LoRA adapters (evaluating the base model)."""
+        prev_states = {}
+        for name, m in self.named_modules():
+            if isinstance(m, LoRALinear):
+                prev_states[name] = getattr(m, "adapter_enabled", True)
+                m.adapter_enabled = False
+        try:
+            yield
+        finally:
+            for name, m in self.named_modules():
+                if isinstance(m, LoRALinear):
+                    m.adapter_enabled = prev_states.get(name, True)
+
+    def set_adapter_enabled(self, enabled: bool = True):
+        """Globally enables or disables all LoRA adapters."""
+        for m in self.modules():
+            if isinstance(m, LoRALinear):
+                m.adapter_enabled = enabled
+
     def print_trainable_params(self):
         total   = sum(p.numel() for p in self.parameters())
         trained = sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -198,5 +223,11 @@ class LoRAModel(nn.Module):
 
     def load_lora(self, path: str):
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)
-        self.load_state_dict(checkpoint["lora_state"], strict=False)
+        lora_state = checkpoint["lora_state"]
+        incompatible = self.load_state_dict(lora_state, strict=False)
+        if incompatible.unexpected_keys:
+            log.warning(f"Unexpected keys while loading LoRA from {path}: {incompatible.unexpected_keys}")
+        missing_lora = [k for k in incompatible.missing_keys if "lora_A" in k or "lora_B" in k]
+        if missing_lora:
+            log.warning(f"Missing LoRA adapter keys when loading from {path}: {missing_lora}")
         log.info(f"LoRA loaded from {path}")

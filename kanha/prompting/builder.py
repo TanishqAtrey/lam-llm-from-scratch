@@ -121,7 +121,8 @@ class PromptBuilder:
         it formats with '### Conversation History:' to ensure 100% inference template match.
         Used by sft_train.py and dpo_train.py to ensure template consistency.
         """
-        if not memory_context and ("Assistant:" in instruction or "Human:" in instruction):
+        import re
+        if not memory_context and re.search(r'(?i)(?:^|\n)\s*(?:human|user|assistant)\s*:', instruction):
             history, inst = self.parse_dialogue(instruction)
             if history:
                 memory_context, instruction = history, inst
@@ -141,9 +142,9 @@ class PromptBuilder:
         """
         import re
         text = text.strip()
-        has_assistant = "Assistant:" in text or "assistant:" in text
-        has_human = "Human:" in text or "User:" in text or "human:" in text or "user:" in text
-        if not (has_assistant and has_human):
+        pattern = re.compile(r'(?i)(?:^|\n)\s*(human|user|assistant)\s*:\s*', re.MULTILINE)
+        matches = list(pattern.finditer(text))
+        if not matches:
             clean = text
             if clean.lower().startswith("human:"):
                 clean = clean[6:].strip()
@@ -151,17 +152,25 @@ class PromptBuilder:
                 clean = clean[5:].strip()
             return "", clean
 
-        turns = re.split(r'\n*(Human:|User:|Assistant:|human:|user:|assistant:)\s*', text)
+        roles = [m.group(1).lower() for m in matches]
+        has_assistant = any(r == "assistant" for r in roles)
+        has_user = any(r in ("human", "user") for r in roles)
+        if not (has_assistant and has_user):
+            clean = text
+            if clean.lower().startswith("human:"):
+                clean = clean[6:].strip()
+            elif clean.lower().startswith("user:"):
+                clean = clean[5:].strip()
+            return "", clean
+
         pairs = []
-        i = 1 if (len(turns) > 1 and turns[0].strip() == '') else 0
-        while i < len(turns) - 1:
-            role = turns[i].rstrip(':').strip().lower()
-            content = turns[i+1].strip()
-            if role in ("human", "user"):
-                pairs.append(("User", content))
-            elif role == "assistant":
-                pairs.append(("Assistant", content))
-            i += 2
+        for i, match in enumerate(matches):
+            role_raw = match.group(1).lower()
+            role = "Assistant" if role_raw == "assistant" else "User"
+            start_pos = match.end()
+            end_pos = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+            content = text[start_pos:end_pos].strip()
+            pairs.append((role, content))
 
         if not pairs:
             return "", text

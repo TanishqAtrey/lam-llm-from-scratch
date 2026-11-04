@@ -184,18 +184,23 @@ class TaskAgent:
     def _generate_action(self, prompt: str, temperature: float = 0.0, top_k: int = None) -> tuple[str, float]:
         """
         Generate an action with confidence score.
-        Returns (action_text, mean_confidence).
+        Returns (action_text, confidence) where confidence uses geometric mean
+        and minimum token confidence to penalize uncertain argument/slot tokens.
         """
         k = top_k if top_k is not None else self._gen_top_k
-        raw, confidence, _ = generate_with_confidence(
+        raw, confidence, per_token_confs = generate_with_confidence(
             self.model, self.tokenizer, prompt,
             max_new_tokens=self._gen_max_tokens,
             temperature=temperature,
             top_k=k,
             repetition_penalty=1.0,  # CRITICAL: 1.0 allows copying exact task IDs and titles from context
             stop_sequences=["\n", "\n### Observation", "### Observation"],
+            confidence_metric="geometric",
         )
-        return self._clean_action(raw), confidence
+        min_conf = min(per_token_confs) if per_token_confs else 1.0
+        # If any crucial token has near-zero probability, reflect that in effective confidence
+        effective_conf = min(confidence, min_conf * 2.0)
+        return self._clean_action(raw), effective_conf
     
     def _detect_loop(self, history: list[dict]) -> bool:
         """

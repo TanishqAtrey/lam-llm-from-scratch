@@ -92,23 +92,27 @@ class SFTDataset(Dataset):
         # This is "### Instruction:\n{instruction}\n\n### Response:\n{response}"
         full_text = self.prompt_builder.build_training_pair(instruction, response)
 
-        # ── Tokenize without mid-sentence fake EOS truncation ──
-        full_ids = self.tokenizer.encode(
-            full_text, add_bos=True, add_eos=True
-        )
-        if len(full_ids) > self.max_len:
-            full_ids = full_ids[:self.max_len]
-
-        # ── Compute instruction length for loss masking ──
+        # ── Compute instruction prefix and response text for boundary-safe tokenization ──
         if "### Response:\n" in full_text:
-            instruction_prefix = full_text[:full_text.rfind("### Response:\n") + len("### Response:\n")]
+            split_idx = full_text.rfind("### Response:\n") + len("### Response:\n")
+            instruction_prefix = full_text[:split_idx]
+            resp_text = full_text[split_idx:]
         else:
             instruction_prefix = f"### Instruction:\n{instruction}\n\n### Response:\n"
+            resp_text = response
 
+        # ── Tokenize prompt and response separately to prevent BPE boundary-piece merging ──
         instruction_ids = self.tokenizer.encode(
             instruction_prefix, add_bos=True, add_eos=False
         )
+        response_ids = self.tokenizer.encode(
+            resp_text, add_bos=False, add_eos=True
+        )
+        full_ids = instruction_ids + response_ids
         mask_len = len(instruction_ids)
+
+        if len(full_ids) > self.max_len:
+            full_ids = full_ids[:self.max_len]
 
         # ── Create shifted input/target pairs ──
         # Standard causal LM: input = tokens[:-1], target = tokens[1:]
@@ -207,6 +211,13 @@ def sft_train(args):
             target_modules=getattr(cfg.lora, "target_modules", ["q_proj", "v_proj"]),
         )
         model.print_trainable_params()
+        if getattr(args, "lr", 3e-5) <= 3e-5:
+            default_lora_lr = 1e-4
+            log.info(
+                f"LoRA enabled: adjusting SFT learning rate from {args.lr} to {default_lora_lr} "
+                f"(LoRA adapters require higher LR than full fine-tuning)"
+            )
+            args.lr = default_lora_lr
 
     model.train()
     model.to(device)

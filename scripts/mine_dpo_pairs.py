@@ -169,8 +169,10 @@ def _find_divergence_pair(
 
     min_len = min(len(chosen_steps), len(rejected_steps))
     for i in range(min_len):
-        c_act = chosen_steps[i].get("action", "").strip()
-        r_act = rejected_steps[i].get("action", "").strip()
+        c_step = chosen_steps[i]
+        r_step = rejected_steps[i]
+        c_act = c_step.get("action", "").strip()
+        r_act = r_step.get("action", "").strip()
 
         # If rejected step has empty action, check if retry_history captured it
         if not r_act and retry_history:
@@ -180,10 +182,19 @@ def _find_divergence_pair(
                     break
 
         # Fallback: if rejected generated empty action / immediate abort
-        if not r_act and not rejected_steps[i].get("valid", True):
+        if not r_act and not r_step.get("valid", True):
             r_act = "\n"
 
         if c_act and (r_act or r_act == "\n") and c_act != r_act:
+            # Ensure the prefix history up to step i matched identically
+            prefix_match = all(
+                chosen_steps[k].get("action", "").strip() == rejected_steps[k].get("action", "").strip()
+                for k in range(i)
+            )
+            if not prefix_match:
+                # If earlier steps differed, pairing at index i with chosen_steps[:i] prompt is invalid
+                continue
+
             prompt = format_step_prompt(goal, chosen_steps[:i])
             c_conf = chosen_confs[i] if i < len(chosen_confs) else 1.0
             r_conf = rejected_confs[i] if i < len(rejected_confs) else 0.0
@@ -331,7 +342,10 @@ def mine_dpo_pairs(args):
             failure_result = failures[idx]
 
             chosen_steps = [s for s in success_result.steps if s.get("valid")]
-            rejected_steps = failure_result.steps if failure_result.steps else getattr(failure_result, "retry_history", [])
+            if failure_result.steps:
+                rejected_steps = [s for s in failure_result.steps[:-1] if s.get("valid")] + failure_result.steps[-1:]
+            else:
+                rejected_steps = getattr(failure_result, "retry_history", [])
 
             divergence = _find_divergence_pair(
                 goal=goal,
@@ -356,7 +370,10 @@ def mine_dpo_pairs(args):
         elif idx in failures and idx in oracle_steps_by_goal:
             failure_result = failures[idx]
             chosen_steps = oracle_steps_by_goal[idx]
-            rejected_steps = failure_result.steps if failure_result.steps else getattr(failure_result, "retry_history", [])
+            if failure_result.steps:
+                rejected_steps = [s for s in failure_result.steps[:-1] if s.get("valid")] + failure_result.steps[-1:]
+            else:
+                rejected_steps = getattr(failure_result, "retry_history", [])
 
             divergence = _find_divergence_pair(
                 goal=goal,

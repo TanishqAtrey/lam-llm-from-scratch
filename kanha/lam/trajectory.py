@@ -13,15 +13,15 @@ OBSERVATION_MARKER = '### Observation\n'
 def format_trajectory(goal: str, steps: list[dict]) -> str:
     parts = [f"{GOAL_MARKER}{goal}\n"]
     for step in steps:
-        parts.append(f"{ACTION_MARKER}{step['action']}\n")
-        parts.append(f"{OBSERVATION_MARKER}{step['observation']}\n")
+        parts.append(f"{ACTION_MARKER}{step.get('action', '')}\n")
+        parts.append(f"{OBSERVATION_MARKER}{step.get('observation', '')}\n")
     return "".join(parts)
 
 def format_step_prompt(goal: str, history: list[dict], include_trailing_action_marker=True) -> str:
     parts = [f"{GOAL_MARKER}{goal}\n"]
     for step in history:
-        parts.append(f"{ACTION_MARKER}{step['action']}\n")
-        parts.append(f"{OBSERVATION_MARKER}{step['observation']}\n")
+        parts.append(f"{ACTION_MARKER}{step.get('action', '')}\n")
+        parts.append(f"{OBSERVATION_MARKER}{step.get('observation', '')}\n")
     if include_trailing_action_marker:
         parts.append(ACTION_MARKER)
     return "".join(parts)
@@ -47,13 +47,11 @@ class LAMDPODataset(Dataset):
         return len(self.examples)
         
     def _process_one(self, prompt, response):
-        full_text = prompt + response
         prompt_tokens = self.tokenizer.encode(prompt, add_bos=True, add_eos=False)
+        resp_tokens = self.tokenizer.encode(response, add_bos=False, add_eos=True)
+        full_ids = prompt_tokens + resp_tokens
         mask_len = len(prompt_tokens)
-        
-        full_ids = self.tokenizer.encode(
-            full_text, add_bos=True, add_eos=True
-        )
+
         if len(full_ids) > self.max_len:
             full_ids = full_ids[:self.max_len]
         

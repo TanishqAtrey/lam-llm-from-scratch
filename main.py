@@ -86,7 +86,8 @@ def main():
     dpo_p.add_argument("--epochs",     type=int, default=1)
     dpo_p.add_argument("--batch_size", type=int, default=1)
     dpo_p.add_argument("--grad_accum_steps", type=int, default=4, help="Gradient accumulation steps (default 4)")
-    dpo_p.add_argument("--lr",         type=float, default=1e-6)
+    dpo_p.add_argument("--lr",         type=float, default=5e-6,
+                        help="Learning rate for full DPO fine-tuning (default 5e-6; auto-adjusts to 5e-5 if --lora is set)")
     dpo_p.add_argument("--beta",       type=float, default=0.1)
     dpo_p.add_argument("--length_norm", action="store_true", help="Normalize sequence log probs by length")
     dpo_p.add_argument("--lam_mode",   action="store_true", help="Enable LAM DPO mode for agent trajectories")
@@ -133,7 +134,8 @@ def main():
     lamdpo_p.add_argument("--epochs",     type=int, default=1)
     lamdpo_p.add_argument("--batch_size", type=int, default=1)
     lamdpo_p.add_argument("--grad_accum_steps", type=int, default=4, help="Gradient accumulation steps (default 4)")
-    lamdpo_p.add_argument("--lr",         type=float, default=1e-6)
+    lamdpo_p.add_argument("--lr",         type=float, default=5e-6,
+                           help="Learning rate for full DPO fine-tuning (default 5e-6; auto-adjusts to 5e-5 if --lora is set)")
     lamdpo_p.add_argument("--beta",       type=float, default=0.1)
     lamdpo_p.add_argument("--length_norm", action="store_true", help="Normalize sequence log probs by length")
     lamdpo_p.add_argument("--lora",       action="store_true", help="Enable LoRA adapter for policy model")

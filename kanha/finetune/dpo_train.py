@@ -166,35 +166,37 @@ class DPODataset(Dataset):
         return len(self.samples)
 
     def _tokenize_pair(self, prompt: str, response: str):
-        """Tokenizes a (prompt, response) pair with instruction masking and dialogue support."""
+        """Tokenizes a (prompt, response) pair with boundary-safe instruction masking and dialogue support."""
         clean_prompt = prompt
         if clean_prompt.startswith("### Instruction:\n"):
             clean_prompt = clean_prompt[len("### Instruction:\n"):].strip()
         if "### Response:\n" in clean_prompt:
             clean_prompt = clean_prompt[:clean_prompt.rfind("### Response:\n")].strip()
-        if clean_prompt.lower().startswith("human:"):
-            clean_prompt = clean_prompt[6:].strip()
-        elif clean_prompt.lower().startswith("user:"):
-            clean_prompt = clean_prompt[5:].strip()
 
         # Format with canonical template (handles multi-turn conversation history automatically)
         full_text = self.prompt_builder.build_training_pair(clean_prompt, response)
 
-        # Tokenize full sequence
-        full_ids = self.tokenizer.encode(
-            full_text, add_bos=True, add_eos=True, max_length=self.max_len
-        )
-
-        # Compute instruction prefix length for masking
+        # Compute instruction prefix and response text for boundary-safe tokenization
         if "### Response:\n" in full_text:
-            instruction_prefix = full_text[:full_text.rfind("### Response:\n") + len("### Response:\n")]
+            split_idx = full_text.rfind("### Response:\n") + len("### Response:\n")
+            instruction_prefix = full_text[:split_idx]
+            resp_text = full_text[split_idx:]
         else:
             instruction_prefix = f"### Instruction:\n{clean_prompt}\n\n### Response:\n"
+            resp_text = response
 
+        # Tokenize prompt and response separately to guarantee exact boundary alignment
         instruction_ids = self.tokenizer.encode(
             instruction_prefix, add_bos=True, add_eos=False
         )
+        resp_ids = self.tokenizer.encode(
+            resp_text, add_bos=False, add_eos=True
+        )
+        full_ids = instruction_ids + resp_ids
         mask_len = len(instruction_ids)
+
+        if len(full_ids) > self.max_len:
+            full_ids = full_ids[:self.max_len]
 
         # Shifted input/labels
         input_ids = full_ids[:-1]
@@ -280,6 +282,13 @@ def dpo_train(args):
             target_modules=getattr(cfg.lora, "target_modules", ["q_proj", "v_proj"]),
         )
         policy.print_trainable_params()
+        if getattr(args, "lr", 5e-6) <= 5e-6:
+            default_lora_lr = 5e-5
+            log.info(
+                f"LoRA enabled: adjusting DPO learning rate from {args.lr} to {default_lora_lr} "
+                f"(LoRA adapters require higher LR than full fine-tuning)"
+            )
+            args.lr = default_lora_lr
 
     policy.train()
     disable_dropout(policy)
@@ -388,7 +397,9 @@ def dpo_train(args):
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     ensure_dir(args.output)
-    best_val_acc = 0.0
+    best_val_score = float("-inf")
+    best_val_acc = -1.0
+    best_val_margin = float("-inf")
 
     log.info(f"DPO Training | epochs={args.epochs} | lr={args.lr} | beta={beta} | "
              f"grad_accum={grad_accum_steps} | length_norm={length_norm} | train={train_size} | val={val_size}")
@@ -519,13 +530,22 @@ def dpo_train(args):
 
             avg_val_acc = sum(val_accs) / max(len(val_accs), 1)
             avg_val_margin = sum(val_margins) / max(len(val_margins), 1)
-            log.info(f"DPO Epoch {epoch+1} Val | Reward Acc: {avg_val_acc:.1%} | Margin: {avg_val_margin:.3f}")
+            composite_score = avg_val_acc * 100.0 + avg_val_margin
+            log.info(
+                f"DPO Epoch {epoch+1} Val | Reward Acc: {avg_val_acc:.1%} | "
+                f"Margin: {avg_val_margin:.3f} | Score: {composite_score:.3f}"
+            )
 
-            if avg_val_acc > best_val_acc:
+            if composite_score > best_val_score or (avg_val_acc > best_val_acc):
+                best_val_score = composite_score
                 best_val_acc = avg_val_acc
+                best_val_margin = avg_val_margin
                 best_ckpt = os.path.join(args.output, "dpo_best.pt")
                 policy.save_pretrained(best_ckpt)
-                log.info(f"New best DPO model saved to {best_ckpt} (Val Acc: {best_val_acc:.1%})")
+                log.info(
+                    f"New best DPO model saved to {best_ckpt} (Val Acc: {best_val_acc:.1%}, "
+                    f"Margin: {best_val_margin:.3f}, Score: {best_val_score:.3f})"
+                )
 
             policy.train()
             disable_dropout(policy)

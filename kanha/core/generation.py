@@ -98,6 +98,28 @@ def sample_next_token(
     return torch.multinomial(probs, num_samples=1)
 
 
+def _enforce_context_budget(input_ids: list[int], max_context: int, max_new_tokens: int) -> list[int]:
+    """
+    Enforces that prompt length does not overflow the model's trained context window.
+    If max_new_tokens < max_context, reserves max_new_tokens for generation.
+    If prompt exceeds available budget, truncates from the left while preserving BOS.
+    """
+    if max_new_tokens < max_context:
+        max_prompt_len = max(1, max_context - max_new_tokens)
+    else:
+        max_prompt_len = max(1, max_context - 1)
+
+    if len(input_ids) > max_prompt_len:
+        log.warning(
+            f"Prompt length ({len(input_ids)}) exceeds prompt budget ({max_prompt_len} tokens for "
+            f"max_seq_len={max_context}, max_new_tokens={max_new_tokens}). Truncating prompt from the left."
+        )
+        if max_prompt_len == 1:
+            return [input_ids[0]]
+        return [input_ids[0]] + input_ids[-(max_prompt_len - 1):]
+    return input_ids
+
+
 # ─── Main generation function ─────────────────────────────────────────────────
 
 @torch.no_grad()
@@ -156,6 +178,7 @@ def generate(
 
     # Encode prompt (BOS added, EOS not — we're continuing from here)
     input_ids    = tokenizer.encode(prompt, add_bos=True, add_eos=False)
+    input_ids    = _enforce_context_budget(input_ids, getattr(model, "max_seq_len", 1024), max_new_tokens)
     prompt_len   = len(input_ids)          # remember where prompt ends
     input_tensor = torch.tensor([input_ids], dtype=torch.long, device=device)
 
@@ -219,6 +242,7 @@ def generate_with_confidence(
     repetition_penalty: float = None,
     stop_tokens: Optional[List[int]] = None,
     stop_sequences: Optional[List[str]] = None,
+    confidence_metric: str    = "geometric",
     device: torch.device      = None,
 ) -> tuple[str, float, list[float]]:
     """
@@ -254,6 +278,7 @@ def generate_with_confidence(
     model.to(device)
 
     input_ids    = tokenizer.encode(prompt, add_bos=True, add_eos=False)
+    input_ids    = _enforce_context_budget(input_ids, getattr(model, "max_seq_len", 1024), max_new_tokens)
     prompt_len   = len(input_ids)
     input_tensor = torch.tensor([input_ids], dtype=torch.long, device=device)
 
@@ -305,9 +330,22 @@ def generate_with_confidence(
             if idx != -1:
                 text = text[:idx]
 
+    import math
     mean_confidence = sum(per_token_confs) / max(len(per_token_confs), 1)
+    min_confidence = min(per_token_confs) if per_token_confs else 1.0
+    geom_confidence = math.exp(
+        sum(math.log(max(p, 1e-12)) for p in per_token_confs) / max(len(per_token_confs), 1)
+    ) if per_token_confs else 1.0
 
-    return text, mean_confidence, per_token_confs
+    if confidence_metric == "arithmetic":
+        chosen_conf = mean_confidence
+    elif confidence_metric == "min":
+        chosen_conf = min_confidence
+    else:
+        # "geometric" default: severely penalizes uncertain slot/argument tokens
+        chosen_conf = geom_confidence
+
+    return text, chosen_conf, per_token_confs
 
 
 # ─── Streaming variant ────────────────────────────────────────────────────────
@@ -356,6 +394,7 @@ def generate_stream(
     model.to(device)
 
     input_ids    = tokenizer.encode(prompt, add_bos=True, add_eos=False)
+    input_ids    = _enforce_context_budget(input_ids, getattr(model, "max_seq_len", 1024), max_new_tokens)
     input_tensor = torch.tensor([input_ids], dtype=torch.long, device=device)
     kv_caches = [None] * model.n_layers
     generated = list(input_ids)

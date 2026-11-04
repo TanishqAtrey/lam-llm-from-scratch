@@ -86,21 +86,18 @@ class LAMSFTDataset(Dataset):
     def __getitem__(self, idx):
         prompt, response = self.examples[idx]
 
-        # Build full text: prompt + response
-        full_text = prompt + response
-
-        # Tokenise without synthesizing fake EOS on truncated actions
-        full_ids = self.tokenizer.encode(
-            full_text, add_bos=True, add_eos=True
-        )
-        if len(full_ids) > self.max_len:
-            full_ids = full_ids[:self.max_len]
-
-        # Compute prompt length for loss masking
+        # Tokenize prompt and response separately to guarantee exact boundary alignment
         prompt_ids = self.tokenizer.encode(
             prompt, add_bos=True, add_eos=False
         )
+        resp_ids = self.tokenizer.encode(
+            response, add_bos=False, add_eos=True
+        )
+        full_ids = prompt_ids + resp_ids
         mask_len = len(prompt_ids)
+
+        if len(full_ids) > self.max_len:
+            full_ids = full_ids[:self.max_len]
 
         # Shifted input / target pairs (standard causal LM)
         input_ids = full_ids[:-1]
@@ -196,6 +193,13 @@ def lam_sft_train(args):
             target_modules=getattr(cfg.lora, "target_modules", ["q_proj", "v_proj"]),
         )
         model.print_trainable_params()
+        if getattr(args, "lr", 3e-5) <= 3e-5:
+            default_lora_lr = 1e-4
+            log.info(
+                f"LoRA enabled: adjusting LAM SFT learning rate from {args.lr} to {default_lora_lr} "
+                f"(LoRA adapters require higher LR than full fine-tuning)"
+            )
+            args.lr = default_lora_lr
 
     model.train()
     model.to(device)
@@ -203,14 +207,26 @@ def lam_sft_train(args):
     # ── Load tokenizer ──
     tokenizer = KanhaTokenizer()
 
-    # ── Dataset with train/val split ──
+    # ── Dataset with train/val split and leakage protection ──
     max_seq_len = getattr(cfg.model, "max_seq_len", 512)
+
+    # If args.data points to the full un-split trajectories file and a split train.jsonl exists, switch to it
+    data_dir = os.path.dirname(args.data) or "."
+    data_base = os.path.basename(args.data)
+    train_candidate = os.path.join(data_dir, "train.jsonl")
+    if data_base == "trajectories.jsonl" and os.path.exists(train_candidate):
+        log.warning(
+            f"Validation leakage prevention: args.data='{args.data}' contains the full un-split dataset. "
+            f"Automatically switching training data to split '{train_candidate}'."
+        )
+        args.data = train_candidate
+
     val_data = getattr(args, "val_data", None)
     if not val_data:
         candidates = [
-            os.path.join(os.path.dirname(args.data), "val.jsonl"),
+            os.path.join(data_dir, "val.jsonl"),
             args.data.replace("_train.jsonl", "_val.jsonl"),
-            os.path.join(os.path.dirname(args.data), "trajectories_val.jsonl"),
+            os.path.join(data_dir, "trajectories_val.jsonl"),
         ]
         for c in candidates:
             if os.path.exists(c) and c != args.data:
@@ -219,8 +235,22 @@ def lam_sft_train(args):
 
     if val_data and os.path.exists(val_data):
         log.info(f"Using separate trajectory validation file: {val_data}")
-        train_dataset = LAMSFTDataset(args.data, tokenizer, max_len=max_seq_len)
-        val_dataset = LAMSFTDataset(val_data, tokenizer, max_len=max_seq_len)
+        with open(val_data, "r", encoding="utf-8") as f:
+            val_trajs = [json.loads(line) for line in f if line.strip()]
+        val_goals = {t.get("goal") for t in val_trajs if t.get("goal")}
+
+        with open(args.data, "r", encoding="utf-8") as f:
+            raw_train_trajs = [json.loads(line) for line in f if line.strip()]
+
+        clean_train_trajs = [t for t in raw_train_trajs if t.get("goal") not in val_goals]
+        removed_overlap = len(raw_train_trajs) - len(clean_train_trajs)
+        if removed_overlap > 0:
+            log.warning(
+                f"Data contamination detected: {removed_overlap} trajectories in '{args.data}' overlapped with '{val_data}'. "
+                f"Filtered them out of training set to ensure completely held-out validation."
+            )
+        train_dataset = LAMSFTDataset(clean_train_trajs, tokenizer, max_len=max_seq_len)
+        val_dataset = LAMSFTDataset(val_trajs, tokenizer, max_len=max_seq_len)
     else:
         # Load full trajectories and split at trajectory level to prevent step leakage
         import random as _rnd

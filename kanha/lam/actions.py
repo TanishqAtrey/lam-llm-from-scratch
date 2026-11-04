@@ -47,6 +47,8 @@ def parse_action(text: str) -> tuple[str, dict]:
             if char == '=':
                 state = 'value'
                 current_key = current_key.strip()
+                if current_key in args_dict:
+                    raise ActionParseError(f"Duplicate argument '{current_key}'")
             else:
                 current_key += char
         elif state == 'value':
@@ -94,9 +96,18 @@ def parse_action(text: str) -> tuple[str, dict]:
         raise ActionParseError("Malformed arguments: unclosed quote")
     current_key = current_key.strip()
     if current_key:
+        if current_key in args_dict:
+            raise ActionParseError(f"Duplicate argument '{current_key}'")
         args_dict[current_key] = current_val.strip()
         
     return action_name, args_dict
+
+VALID_DUE_PHRASES = {
+    'today', 'tomorrow', 'monday', 'tuesday', 'wednesday',
+    'thursday', 'friday', 'saturday', 'sunday', 'next week'
+}
+ISO_DATE_PATTERN = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
 
 def validate_action(name: str, args: dict) -> tuple[bool, str]:
     if name not in ACTION_SCHEMA:
@@ -110,6 +121,23 @@ def validate_action(name: str, args: dict) -> tuple[bool, str]:
     for arg in args:
         if arg not in schema['req'] and arg not in schema['opt']:
             return False, f"Unknown argument: {arg}"
+
+    # Empty payload guards
+    if name == 'add':
+        if not args.get('title', '').strip():
+            return False, "Argument 'title' cannot be empty"
+
+    if name == 'find':
+        if not args.get('q', '').strip():
+            return False, "Argument 'q' cannot be empty"
+
+    if name in {'ask', 'finish'}:
+        if not args.get('msg', '').strip():
+            return False, "Argument 'msg' cannot be empty"
+
+    if name == 'edit':
+        if not args.get('value', '').strip():
+            return False, "Argument 'value' cannot be empty"
             
     if 'id' in args:
         try:
@@ -117,17 +145,42 @@ def validate_action(name: str, args: dict) -> tuple[bool, str]:
         except ValueError:
             return False, "Argument 'id' must be an integer"
             
-    if 'prio' in args and args['prio'] not in {'low', 'med', 'high'}:
-        return False, "Argument 'prio' must be one of: low, med, high"
+    if 'prio' in args:
+        val = args['prio'].lower()
+        if val not in {'low', 'med', 'high'}:
+            return False, "Argument 'prio' must be one of: low, med, high"
+        args['prio'] = val
         
-    if 'field' in args and args['field'] not in {'title', 'due', 'priority', 'tag', 'prio'}:
-        return False, "Argument 'field' must be one of: title, due, priority, tag, prio"
+    if 'field' in args:
+        field = args['field'].lower()
+        if field not in {'title', 'due', 'priority', 'tag', 'prio'}:
+            return False, "Argument 'field' must be one of: title, due, priority, tag, prio"
+        args['field'] = field
 
-    if args.get('field') in {'prio', 'priority'} and args.get('value') not in {'low', 'med', 'high'}:
-        return False, "Argument 'value' for priority must be one of: low, med, high"
+    if args.get('field') in {'prio', 'priority'}:
+        val = args.get('value', '').lower()
+        if val not in {'low', 'med', 'high'}:
+            return False, "Argument 'value' for priority must be one of: low, med, high"
+        args['value'] = val
+
+    # Due date validation
+    if 'due' in args:
+        due_val = args['due'].strip().lower()
+        if due_val not in VALID_DUE_PHRASES and not ISO_DATE_PATTERN.match(due_val):
+            return False, f"Invalid date value for 'due': {args['due']}"
+        args['due'] = due_val
+
+    if args.get('field') == 'due':
+        due_val = args.get('value', '').strip().lower()
+        if due_val not in VALID_DUE_PHRASES and not ISO_DATE_PATTERN.match(due_val):
+            return False, f"Invalid date value for 'due': {args['value']}"
+        args['value'] = due_val
         
-    if 'status' in args and args['status'] not in {'todo', 'done'}:
-        return False, "Argument 'status' must be one of: todo, done"
+    if 'status' in args:
+        val = args['status'].lower()
+        if val not in {'todo', 'done'}:
+            return False, "Argument 'status' must be one of: todo, done"
+        args['status'] = val
         
     return True, ""
 

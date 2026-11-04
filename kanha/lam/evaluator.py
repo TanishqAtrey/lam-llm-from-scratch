@@ -66,7 +66,14 @@ class LAMEvaluator:
         self.model = model
         self.tokenizer = tokenizer
         self.test_data_path = test_data_path
-        self.reference_date = reference_date
+        if reference_date is None:
+            try:
+                from kanha.utils.config import cfg
+                self.reference_date = getattr(cfg.lam, "reference_date", "2025-01-15")
+            except Exception:
+                self.reference_date = "2025-01-15"
+        else:
+            self.reference_date = reference_date
         
         self.test_cases = []
         with open(test_data_path, 'r', encoding='utf-8') as f:
@@ -197,8 +204,9 @@ class LAMEvaluator:
         # Confidence metrics
         if all_confidences:
             report.avg_confidence = sum(all_confidences) / len(all_confidences)
-        if total_actions > 0:
-            report.low_confidence_rate = total_low_conf / total_actions
+        total_decisions = total_actions + total_low_conf
+        if total_decisions > 0:
+            report.low_confidence_rate = total_low_conf / total_decisions
             
         for t in report.per_tier_success:
             report.per_tier_success[t]['rate'] = report.per_tier_success[t]['success'] / max(1, report.per_tier_success[t]['total'])
@@ -233,6 +241,9 @@ class LAMEvaluator:
                 return False
         if 'contains_title' in expected:
             if str(expected['contains_title']).lower() not in reply_lower:
+                return False
+        if 'contains_phrase' in expected:
+            if str(expected['contains_phrase']).lower() not in reply_lower:
                 return False
         return True
         

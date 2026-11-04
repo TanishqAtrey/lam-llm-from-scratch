@@ -147,41 +147,69 @@ class InferenceEngine:
             tool_descriptions=tool_desc,
         )
 
-        # 3. Stream tokens from model
-        response_parts = []
-        for token_text in generate_stream(
-            self.model,
-            self.tokenizer,
-            prompt,
-            max_new_tokens=cfg.inference.max_new_tokens,
-            temperature=cfg.inference.temperature,
-            top_k=cfg.inference.top_k,
-            top_p=cfg.inference.top_p,
-            repetition_penalty=cfg.inference.repetition_penalty,
-            device=self.device,
-        ):
-            response_parts.append(token_text)
-            yield token_text
-
-        raw_response = "".join(response_parts)
-        final_response = raw_response
-
-        # 4. Tool execution
+        # 3. Stream tokens from model (with ReAct loop if tools enabled)
         if self.use_tools and self.tool_router:
-            executed_response = self.tool_router.maybe_execute(raw_response)
-            if executed_response != raw_response:
-                diff = executed_response[len(raw_response):]
-                yield diff
-                final_response = executed_response
+            from kanha.tools.router import find_tool_calls
+            curr_prompt = prompt
+            full_response_parts = []
+            max_tool_iters = 3
 
-        # 5. Safety filter
+            for _ in range(max_tool_iters):
+                step_parts = []
+                for token_text in generate_stream(
+                    self.model,
+                    self.tokenizer,
+                    curr_prompt,
+                    max_new_tokens=cfg.inference.max_new_tokens,
+                    temperature=cfg.inference.temperature,
+                    top_k=cfg.inference.top_k,
+                    top_p=cfg.inference.top_p,
+                    repetition_penalty=cfg.inference.repetition_penalty,
+                    stop_sequences=["[Tool Result:", "\nObservation:"],
+                    device=self.device,
+                ):
+                    step_parts.append(token_text)
+                    yield token_text
+
+                gen_text = "".join(step_parts)
+                tool_calls = find_tool_calls(gen_text)
+                if not tool_calls:
+                    full_response_parts.append(gen_text)
+                    break
+
+                executed = self.tool_router.maybe_execute(gen_text)
+                tool_output = executed[len(gen_text):]
+                if tool_output:
+                    yield tool_output
+                full_response_parts.append(gen_text + tool_output)
+                curr_prompt = curr_prompt + gen_text + tool_output + "\n"
+            final_response = "".join(full_response_parts)
+        else:
+            response_parts = []
+            for token_text in generate_stream(
+                self.model,
+                self.tokenizer,
+                prompt,
+                max_new_tokens=cfg.inference.max_new_tokens,
+                temperature=cfg.inference.temperature,
+                top_k=cfg.inference.top_k,
+                top_p=cfg.inference.top_p,
+                repetition_penalty=cfg.inference.repetition_penalty,
+                device=self.device,
+            ):
+                response_parts.append(token_text)
+                yield token_text
+
+            final_response = "".join(response_parts)
+
+        # 4. Safety filter
         try:
             from kanha.alignment.filters import filter_response
             final_response = filter_response(final_response)
         except ImportError:
             pass
 
-        # 6. Update memory
+        # 5. Update memory
         self.memory.add("user", user_message)
         self.memory.add("assistant", final_response)
 
@@ -234,24 +262,53 @@ class InferenceEngine:
             tool_descriptions=tool_desc,
         )
 
-        # 3. Generate
-        response = generate(
-            self.model,
-            self.tokenizer,
-            prompt,
-            max_new_tokens=cfg.inference.max_new_tokens,
-            temperature=cfg.inference.temperature,
-            top_k=cfg.inference.top_k,
-            top_p=cfg.inference.top_p,
-            repetition_penalty=cfg.inference.repetition_penalty,
-            device=self.device,
-        )
-
-        # 4. Tool execution
+        # 3. Generate (with ReAct loop if tools enabled)
         if self.use_tools and self.tool_router:
-            response = self.tool_router.maybe_execute(response)
+            from kanha.tools.router import find_tool_calls
+            curr_prompt = prompt
+            full_response = ""
+            max_tool_iters = 3
 
-        # 5. Safety filter
+            for _ in range(max_tool_iters):
+                gen_text = generate(
+                    self.model,
+                    self.tokenizer,
+                    curr_prompt,
+                    max_new_tokens=cfg.inference.max_new_tokens,
+                    temperature=cfg.inference.temperature,
+                    top_k=cfg.inference.top_k,
+                    top_p=cfg.inference.top_p,
+                    repetition_penalty=cfg.inference.repetition_penalty,
+                    stop_sequences=["[Tool Result:", "\nObservation:"],
+                    device=self.device,
+                )
+                tool_calls = find_tool_calls(gen_text)
+                if not tool_calls:
+                    full_response = full_response + gen_text if full_response else gen_text
+                    break
+
+                executed = self.tool_router.maybe_execute(gen_text)
+                tool_output = executed[len(gen_text):]
+                full_response = full_response + gen_text + tool_output
+                curr_prompt = curr_prompt + gen_text + tool_output + "\n"
+            else:
+                if not full_response:
+                    full_response = gen_text
+            response = full_response
+        else:
+            response = generate(
+                self.model,
+                self.tokenizer,
+                prompt,
+                max_new_tokens=cfg.inference.max_new_tokens,
+                temperature=cfg.inference.temperature,
+                top_k=cfg.inference.top_k,
+                top_p=cfg.inference.top_p,
+                repetition_penalty=cfg.inference.repetition_penalty,
+                device=self.device,
+            )
+
+        # 4. Safety filter
         try:
             from kanha.alignment.filters import filter_response
             response = filter_response(response)

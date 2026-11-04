@@ -198,6 +198,8 @@ class TaskStore:
             task_id = data['id']
             if task_id in self._tasks:
                 del self._tasks[task_id]
+                if self._next_id == task_id + 1:
+                    self._next_id = task_id
             msg = f"Undid add: removed task {task_id}"
         elif op == 'edit':
             task_id = data['id']

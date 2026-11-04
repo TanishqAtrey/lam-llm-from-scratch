@@ -40,42 +40,39 @@ log = get_logger("lam_sft")
 
 class LAMSFTDataset(Dataset):
     """
-    Loads trajectory JSONL, expands each trajectory into per-step
-    (prompt, response) pairs, and tokenises them with prompt masking.
-
-    Each JSONL line has:
-        {"goal": "...", "steps": [{"action": "...", "observation": "..."}, ...], ...}
-
-    For a trajectory with N steps we create N training examples:
-        step 0: prompt = "### Goal\\n{goal}\\n### Action\\n"
-                 response = steps[0]["action"]
-        step i: prompt = goal + steps[:i] history + "### Action\\n"
-                 response = steps[i]["action"]
+    Loads trajectory JSONL (or list of trajectory dicts), expands each trajectory
+    into per-step (prompt, response) pairs, and tokenises them with prompt masking.
     """
 
-    def __init__(self, data_path: str, tokenizer: KanhaTokenizer, max_len: int = 512):
+    def __init__(self, data: Union[str, list[dict]], tokenizer: KanhaTokenizer, max_len: int = 512):
         self.tokenizer = tokenizer
         self.max_len = max_len
         self.examples: list[tuple[str, str]] = []  # (prompt, response)
 
-        with open(data_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                traj = json.loads(line)
-                goal = traj["goal"]
-                steps = traj.get("steps", [])
-                if not steps:
-                    continue
-                # Expand into per-step examples
-                for i, step in enumerate(steps):
-                    history = steps[:i]
-                    prompt = build_lam_step_prompt(goal, history)
-                    response = step["action"]
+        trajectories = []
+        if isinstance(data, str):
+            with open(data, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        trajectories.append(json.loads(line))
+        else:
+            trajectories = data
+
+        for traj in trajectories:
+            goal = traj.get("goal", "")
+            steps = traj.get("steps", [])
+            if not steps or not goal:
+                continue
+            for i, step in enumerate(steps):
+                history = steps[:i]
+                prompt = build_lam_step_prompt(goal, history)
+                response = step.get("action", "")
+                if response:
                     self.examples.append((prompt, response))
 
-        log.info(f"Loaded {len(self.examples):,} LAM training steps from {data_path}")
+        src_desc = f"{len(trajectories)} trajectories" if isinstance(data, list) else data
+        log.info(f"Loaded {len(self.examples):,} LAM training steps from {src_desc}")
 
     def __len__(self):
         return len(self.examples)
@@ -109,20 +106,30 @@ class LAMSFTDataset(Dataset):
         if not any(l != -100 for l in labels) and len(labels) > 0:
             labels[-1] = full_ids[-1]
 
-        # Pad / truncate to max_len - 1
-        seq_len = self.max_len - 1
-        pad_len = seq_len - len(input_ids)
-        if pad_len > 0:
-            input_ids = input_ids + [self.tokenizer.PAD_ID] * pad_len
-            labels = labels + [-100] * pad_len
-        else:
-            input_ids = input_ids[:seq_len]
-            labels = labels[:seq_len]
-
         return {
             "input_ids": torch.tensor(input_ids, dtype=torch.long),
             "labels": torch.tensor(labels, dtype=torch.long),
         }
+
+
+def lam_collate_fn(batch, pad_id=0):
+    """Dynamically pads each batch to its maximum sequence length instead of fixed 1023."""
+    max_len = max(len(x["input_ids"]) for x in batch)
+    b_input_ids = []
+    b_labels = []
+    for x in batch:
+        inp = x["input_ids"]
+        lbl = x["labels"]
+        pad_len = max_len - len(inp)
+        if pad_len > 0:
+            inp = torch.cat([inp, torch.full((pad_len,), pad_id, dtype=torch.long)])
+            lbl = torch.cat([lbl, torch.full((pad_len,), -100, dtype=torch.long)])
+        b_input_ids.append(inp)
+        b_labels.append(lbl)
+    return {
+        "input_ids": torch.stack(b_input_ids),
+        "labels": torch.stack(b_labels),
+    }
 
 
 # ── Validation helper ─────────────────────────────────────────────────────────
@@ -184,25 +191,45 @@ def lam_sft_train(args):
 
     # ── Dataset with train/val split ──
     max_seq_len = getattr(cfg.model, "max_seq_len", 512)
-    full_dataset = LAMSFTDataset(args.data, tokenizer, max_len=max_seq_len)
+    val_data = getattr(args, "val_data", None)
+    if not val_data:
+        candidate_val = os.path.join(os.path.dirname(args.data), "val.jsonl")
+        if os.path.exists(candidate_val) and candidate_val != args.data:
+            val_data = candidate_val
 
-    val_size = max(1, int(len(full_dataset) * val_fraction))
-    train_size = len(full_dataset) - val_size
-    train_dataset, val_dataset = torch.utils.data.random_split(
-        full_dataset, [train_size, val_size],
-        generator=torch.Generator().manual_seed(42),
-    )
+    if val_data and os.path.exists(val_data):
+        log.info(f"Using separate trajectory validation file: {val_data}")
+        train_dataset = LAMSFTDataset(args.data, tokenizer, max_len=max_seq_len)
+        val_dataset = LAMSFTDataset(val_data, tokenizer, max_len=max_seq_len)
+    else:
+        # Load full trajectories and split at trajectory level to prevent step leakage
+        import random as _rnd
+        with open(args.data, "r", encoding="utf-8") as f:
+            all_trajs = [json.loads(line) for line in f if line.strip()]
+
+        val_count = max(1, int(len(all_trajs) * val_fraction))
+        train_count = len(all_trajs) - val_count
+
+        rng = _rnd.Random(42)
+        rng.shuffle(all_trajs)
+        train_trajs = all_trajs[:train_count]
+        val_trajs = all_trajs[train_count:]
+
+        train_dataset = LAMSFTDataset(train_trajs, tokenizer, max_len=max_seq_len)
+        val_dataset = LAMSFTDataset(val_trajs, tokenizer, max_len=max_seq_len)
 
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size,
         shuffle=True, drop_last=True, num_workers=0,
+        collate_fn=lam_collate_fn,
     )
     val_loader = DataLoader(
         val_dataset, batch_size=args.batch_size,
         shuffle=False, drop_last=False, num_workers=0,
+        collate_fn=lam_collate_fn,
     )
 
-    log.info(f"Split: {train_size:,} train / {val_size:,} val steps")
+    log.info(f"Split: {len(train_dataset):,} train / {len(val_dataset):,} val steps")
 
     # ── Optimizer (same safe defaults as sft_train) ──
     trainable_params = [p for p in model.parameters() if p.requires_grad]
@@ -213,9 +240,12 @@ def lam_sft_train(args):
         betas=(0.9, 0.95),
     )
 
+    grad_accum_steps = getattr(args, "grad_accum_steps", None) or getattr(cfg.training, "grad_accum_steps", 4)
+    grad_accum_steps = max(1, int(grad_accum_steps))
+
     # ── Warmup + cosine schedule ──
-    total_steps = len(train_loader) * args.epochs
-    warmup_steps = min(100, total_steps // 10)
+    total_steps = math.ceil(len(train_loader) / grad_accum_steps) * args.epochs
+    warmup_steps = min(100, max(1, total_steps // 10))
 
     def lr_lambda(step):
         if step < warmup_steps:
@@ -233,16 +263,18 @@ def lam_sft_train(args):
 
     log.info(
         f"LAM SFT Training | epochs={args.epochs} | lr={args.lr} | "
-        f"batch_size={args.batch_size} | train={train_size:,} | val={val_size:,}"
+        f"batch_size={args.batch_size} | grad_accum={grad_accum_steps} | "
+        f"train={train_size:,} | val={val_size:,}"
     )
     log.info(f"Total optimiser steps: {total_steps:,} | Warmup: {warmup_steps} | Patience: {patience}")
 
     for epoch in range(args.epochs):
         epoch_loss = 0.0
         n_batches = 0
+        optimizer.zero_grad()
 
         pbar = tqdm(train_loader, desc=f"LAM Epoch {epoch+1}/{args.epochs}")
-        for batch in pbar:
+        for batch_idx, batch in enumerate(pbar):
             input_ids = batch["input_ids"].to(device)
             labels = batch["labels"].to(device)
             if not (labels != -100).any():
@@ -251,12 +283,15 @@ def lam_sft_train(args):
             # Forward
             logits, loss, _ = model(input_ids, targets=labels)
 
-            # Backward
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.training.grad_clip)
-            optimizer.step()
-            scheduler.step()
-            optimizer.zero_grad()
+            # Backward with gradient accumulation
+            loss_scaled = loss / grad_accum_steps
+            loss_scaled.backward()
+
+            if (batch_idx + 1) % grad_accum_steps == 0 or (batch_idx + 1) == len(train_loader):
+                torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.training.grad_clip)
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
 
             epoch_loss += loss.item()
             n_batches += 1

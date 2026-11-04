@@ -50,9 +50,26 @@ def run_kaggle_pipeline():
     with zipfile.ZipFile(CODE_ZIP, 'r') as z:
         z.extractall("/kaggle/working/")
 
-    # Find the extracted directory
-    extracted = "/kaggle/working/kanha-source/kanha-source-clean"
-    if os.path.exists(extracted):
+    # Find the extracted directory dynamically
+    extracted = None
+    candidates = [
+        "/kaggle/working/kanha-source/kanha-source-clean",
+        "/kaggle/working/kanha-source",
+        "/kaggle/working/decoder-only-transformer-from-scratch-main",
+        "/kaggle/working/kanha-fixed",
+    ]
+    for c in candidates:
+        if os.path.exists(os.path.join(c, "kanha")) or os.path.exists(os.path.join(c, "main.py")):
+            extracted = c
+            break
+
+    if not extracted:
+        for root, dirs, files in os.walk("/kaggle/working"):
+            if "main.py" in files and "kanha" in dirs and os.path.abspath(root) != os.path.abspath(WORK_DIR):
+                extracted = root
+                break
+
+    if extracted and os.path.abspath(extracted) != os.path.abspath(WORK_DIR):
         # Move contents to WORK_DIR
         if os.path.exists(WORK_DIR):
             shutil.rmtree(WORK_DIR)

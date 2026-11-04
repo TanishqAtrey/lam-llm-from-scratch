@@ -175,5 +175,10 @@ def train_tokenizer(
         num_threads=num_threads,
         shuffle_input_sentence=True,
         input_sentence_size=sample_size,   # Fix: caps RAM — samples N sentences instead of loading full file
+        remove_extra_whitespaces=False,    # Preserves indentation and newlines in code/markdown
+        normalization_rule_name="identity", # Prevents normalization from stripping newlines
+        byte_fallback=True,                # Eliminates <unk> by falling back to raw UTF-8 byte tokens
+        split_digits=True,                 # Preserves numerical arithmetic precision
+        allow_whitespace_only_pieces=True, # Supports tab/space indentation tokens
     )
     log.info(f"Tokenizer saved to {model_prefix}.model")

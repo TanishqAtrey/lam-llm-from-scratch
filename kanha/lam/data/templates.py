@@ -230,7 +230,13 @@ def sample_goal(tier: str, world, rng: random.Random) -> tuple[str, dict]:
             if active_tasks:
                 task = rng.choice(active_tasks)
                 parts = task.title.split()
-                slot_values[slot] = rng.choice(parts) if parts else task.title
+                meaningful_parts = [
+                    w for w in parts
+                    if len(w) >= 3 and w.lower() not in {
+                        "the", "to", "a", "an", "and", "for", "with", "of", "in", "on", "at", "from", "my", "it", "out"
+                    }
+                ]
+                slot_values[slot] = rng.choice(meaningful_parts) if meaningful_parts else (parts[0] if parts else task.title)
                 info[f"{slot}_val"] = task.title
                 info["target_id"] = task.id
             else:

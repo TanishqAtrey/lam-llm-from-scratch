@@ -34,10 +34,10 @@ def main():
     train_p = sub.add_parser("train", aliases=["pretrain"], help="Pre-train from scratch")
     train_p.add_argument("--data",   required=True)
     train_p.add_argument("--resume", default=None)
-    train_p.add_argument("--val_fraction", type=float, default=0.1,
-                         help="Fraction of data for validation (default 0.1)")
-    train_p.add_argument("--patience", type=int, default=5,
-                         help="Early stop after N evals without val improvement")
+    train_p.add_argument("--val_fraction", type=float, default=None,
+                         help="Fraction of data for validation (default: from config)")
+    train_p.add_argument("--patience", type=int, default=None,
+                         help="Early stop after N evals without val improvement (default: from config)")
     train_p.add_argument("--eval_every", type=int, default=None,
                          help="Evaluate val loss every N steps (default=save_every)")
 
@@ -48,6 +48,8 @@ def main():
     ft_p.add_argument("--output", default="models/finetuned/")
     ft_p.add_argument("--epochs", type=int, default=3)
     ft_p.add_argument("--batch_size", type=int, default=1)
+    ft_p.add_argument("--grad_accum_steps", type=int, default=4,
+                       help="Gradient accumulation steps (default 4)")
     ft_p.add_argument("--lr",         type=float, default=3e-5)
     ft_p.add_argument("--val_fraction", type=float, default=0.1,
                        help="Fraction of data for validation (default 0.1)")
@@ -81,6 +83,7 @@ def main():
     dpo_p.add_argument("--batch_size", type=int, default=1)
     dpo_p.add_argument("--lr",         type=float, default=1e-6)
     dpo_p.add_argument("--beta",       type=float, default=0.1)
+    dpo_p.add_argument("--length_norm", action="store_true", help="Normalize sequence log probs by length")
     dpo_p.add_argument("--lam_mode",   action="store_true", help="Enable LAM DPO mode for agent trajectories")
     dpo_p.add_argument("--lora",       action="store_true", help="Enable LoRA adapter for policy model")
 
@@ -106,6 +109,8 @@ def main():
     lamtrain_p.add_argument("--output",     default="models/lam/")
     lamtrain_p.add_argument("--epochs",     type=int, default=3)
     lamtrain_p.add_argument("--batch_size", type=int, default=4)
+    lamtrain_p.add_argument("--grad_accum_steps", type=int, default=4,
+                            help="Gradient accumulation steps (default 4)")
     lamtrain_p.add_argument("--lr",         type=float, default=3e-5)
     lamtrain_p.add_argument("--val_fraction", type=float, default=0.1,
                              help="Fraction of data for validation (default 0.1)")
@@ -123,6 +128,7 @@ def main():
     lamdpo_p.add_argument("--batch_size", type=int, default=1)
     lamdpo_p.add_argument("--lr",         type=float, default=1e-6)
     lamdpo_p.add_argument("--beta",       type=float, default=0.1)
+    lamdpo_p.add_argument("--length_norm", action="store_true", help="Normalize sequence log probs by length")
     lamdpo_p.add_argument("--lora",       action="store_true", help="Enable LoRA adapter for policy model")
 
     # ── agent ─────────────────────────────────────────────────────────────
@@ -137,6 +143,7 @@ def main():
     lameval_p.add_argument("--model",     required=True)
     lameval_p.add_argument("--test_data", "--data", dest="test_data", required=True)
     lameval_p.add_argument("--output",    default="results/lam_eval.json")
+    lameval_p.add_argument("--reference_date", default="2025-01-15")
 
     # ── mine-dpo ──────────────────────────────────────────────────────────
     mine_p = sub.add_parser("mine-dpo", help="Auto-mine DPO pairs from agent trajectories")
@@ -289,7 +296,7 @@ def _lam_eval(args):
     model = KanhaModel.from_pretrained(args.model)
     tokenizer = KanhaTokenizer()
 
-    evaluator = LAMEvaluator(model, tokenizer, args.test_data)
+    evaluator = LAMEvaluator(model, tokenizer, args.test_data, reference_date=getattr(args, "reference_date", "2025-01-15"))
     report = evaluator.evaluate()
 
     print(report.summary())

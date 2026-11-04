@@ -111,6 +111,7 @@ def generate(
     top_p: float              = None,
     repetition_penalty: float = None,
     stop_tokens: Optional[List[int]] = None,
+    stop_sequences: Optional[List[str]] = None,
     device: torch.device      = None,
 ) -> str:
     """
@@ -131,6 +132,7 @@ def generate(
         top_p             : nucleus filter
         repetition_penalty: penalize repeated tokens
         stop_tokens       : token ids that stop generation early
+        stop_sequences    : multi-token string sequences that stop generation early
         device            : torch device
 
     Returns:
@@ -183,13 +185,24 @@ def generate(
         if next_id in stop_tokens:
             break
 
+        if stop_sequences:
+            current_text = tokenizer.decode(generated[prompt_len:], skip_special=True)
+            if any(seq in current_text for seq in stop_sequences):
+                break
+
         # Feed only the new token — KV cache handles the rest
         input_tensor = next_token
 
     # Decode ONLY the new tokens — never the prompt
     # This is the correct fix vs. fragile startswith() string stripping
     new_ids = generated[prompt_len:]
-    return tokenizer.decode(new_ids, skip_special=True)
+    text = tokenizer.decode(new_ids, skip_special=True)
+    if stop_sequences:
+        for seq in stop_sequences:
+            idx = text.find(seq)
+            if idx != -1:
+                text = text[:idx]
+    return text
 
 
 # ─── Generation with confidence scoring ───────────────────────────────────────
@@ -205,6 +218,7 @@ def generate_with_confidence(
     top_p: float              = None,
     repetition_penalty: float = None,
     stop_tokens: Optional[List[int]] = None,
+    stop_sequences: Optional[List[str]] = None,
     device: torch.device      = None,
 ) -> tuple[str, float, list[float]]:
     """
@@ -275,11 +289,21 @@ def generate_with_confidence(
         if next_id in stop_tokens:
             break
 
+        if stop_sequences:
+            current_text = tokenizer.decode(generated[prompt_len:], skip_special=True)
+            if any(seq in current_text for seq in stop_sequences):
+                break
+
         input_tensor = next_token
 
     # Decode only new tokens
     new_ids = generated[prompt_len:]
     text = tokenizer.decode(new_ids, skip_special=True)
+    if stop_sequences:
+        for seq in stop_sequences:
+            idx = text.find(seq)
+            if idx != -1:
+                text = text[:idx]
 
     mean_confidence = sum(per_token_confs) / max(len(per_token_confs), 1)
 
@@ -299,6 +323,7 @@ def generate_stream(
     top_p: float              = None,
     repetition_penalty: float = None,
     stop_tokens: Optional[List[int]] = None,
+    stop_sequences: Optional[List[str]] = None,
     device: torch.device      = None,
 ):
     """
@@ -356,6 +381,11 @@ def generate_stream(
 
         if next_id in stop_tokens:
             break
+
+        if stop_sequences:
+            full_text_check = tokenizer.decode(new_ids + [next_id], skip_special=True)
+            if any(seq in full_text_check for seq in stop_sequences):
+                break
 
         # Incremental decode: decode ALL new tokens, yield only the new part
         # This preserves SentencePiece's ▁ → space conversion correctly

@@ -312,16 +312,20 @@ def download_hh_rlhf():
             Assistant: ...
             Human: ...
             Assistant: (final response)
-        We extract the last human prompt and final assistant response.
+        We extract the full dialogue context up to the final Assistant turn as the prompt,
+        preserving multi-turn history, and the final turn as the response.
         """
-        parts = text.strip().split("\n\nAssistant:")
-        if len(parts) < 2:
+        last_asst_idx = text.rfind("\n\nAssistant:")
+        if last_asst_idx == -1:
             return None, None
 
-        response = parts[-1].strip()
-        # Get last human turn
-        human_parts = parts[-2].split("\n\nHuman:")
-        prompt = human_parts[-1].strip()
+        prompt = text[:last_asst_idx].strip()
+        response = text[last_asst_idx + len("\n\nAssistant:"):].strip()
+
+        if prompt.startswith("Human:"):
+            prompt = prompt[len("Human:"):].strip()
+        elif prompt.startswith("\n\nHuman:"):
+            prompt = prompt[len("\n\nHuman:"):].strip()
 
         if not prompt or not response:
             return None, None

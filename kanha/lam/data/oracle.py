@@ -71,6 +71,7 @@ class Oracle:
         if m:
             count = int(m.group(1))
 
+        info["expected_reply"] = {"contains_number": count}
         finish = f'finish(msg="You have {count} matching tasks.")'
         obs_f, _ = env.step(finish)
         return [(action, obs), (finish, obs_f)]
@@ -91,6 +92,7 @@ class Oracle:
         action = f"list({', '.join(parts)})"
         obs, _ = env.step(action)
 
+        info["expected_reply"] = {"contains_phrase": "tasks"}
         finish = 'finish(msg="Here are your tasks.")'
         obs_f, _ = env.step(finish)
         return [(action, obs), (finish, obs_f)]
@@ -126,25 +128,44 @@ class Oracle:
             obs_f, _ = env.step(finish)
             return [(act1, obs1), (finish, obs_f)]
         goal = (info.get("goal") or info.get("goal_text", "")).lower()
+        raw_tmpl = (info.get("goal") or "").lower() if "{" in info.get("goal", "") else ""
 
-        # Step 2: determine the action based on goal intent
-        if "move" in goal or "reschedule" in goal:
-            due = info.get("due_phrase_val", "today")
-            act2 = f'edit(id={task_id}, field=due, value={due})'
-        elif "change" in goal or "set" in goal:
-            # Priority change: field is "priority" (the Task field name)
-            prio = info.get("prio_val_val", info.get("prio_phrase_val", "med"))
-            act2 = f'edit(id={task_id}, field=priority, value={prio})'
-        elif "rename" in goal:
+        # Step 2: determine the action based on goal intent without substring collisions
+        if raw_tmpl:
+            if any(k in raw_tmpl for k in ["done", "complete", "finish", "mark"]):
+                act2 = f"done(id={task_id})"
+            elif any(k in raw_tmpl for k in ["delete", "remove"]):
+                act2 = f"delete(id={task_id})"
+            elif "rename" in raw_tmpl or "new_title" in slots:
+                new_title = slots.get("new_title", "new task")
+                act2 = f'edit(id={task_id}, field=title, value="{new_title}")'
+            elif "tag" in raw_tmpl:
+                tag = slots.get("tag", "home")
+                act2 = f'edit(id={task_id}, field=tag, value={tag})'
+            elif "move" in raw_tmpl or "reschedule" in raw_tmpl:
+                due = info.get("due_phrase_val", "today")
+                act2 = f'edit(id={task_id}, field=due, value={due})'
+            elif "prio" in raw_tmpl or "change" in raw_tmpl or "set" in raw_tmpl:
+                prio = info.get("prio_val_val", info.get("prio_phrase_val", "med"))
+                act2 = f'edit(id={task_id}, field=priority, value={prio})'
+            else:
+                act2 = f"done(id={task_id})"
+        elif "new_title" in slots or "rename" in goal:
             new_title = slots.get("new_title", "new task")
             act2 = f'edit(id={task_id}, field=title, value="{new_title}")'
-        elif "tag" in goal and "as" in goal:
+        elif "tag" in slots and ("tag" in goal and "as" in goal):
             tag = slots.get("tag", "home")
             act2 = f'edit(id={task_id}, field=tag, value={tag})'
-        elif any(kw in goal for kw in ["mark", "complete", "finish", "done"]):
+        elif any(kw in goal for kw in ["mark", "complete", "done"]):
             act2 = f"done(id={task_id})"
         elif "delete" in goal or "remove" in goal:
             act2 = f"delete(id={task_id})"
+        elif "move" in goal or "reschedule" in goal:
+            due = info.get("due_phrase_val", "today")
+            act2 = f'edit(id={task_id}, field=due, value={due})'
+        elif "prio_phrase_val" in info or "prio_val_val" in info or "priority" in goal or (("change" in goal or "set" in goal) and any(p in goal for p in ["low", "med", "high", "prio"])):
+            prio = info.get("prio_val_val", info.get("prio_phrase_val", "med"))
+            act2 = f'edit(id={task_id}, field=priority, value={prio})'
         else:
             act2 = f"done(id={task_id})"
 
@@ -205,11 +226,15 @@ class Oracle:
         act1 = "list()"
         obs1, _ = env.step(act1)
 
+        info["expected_reply"] = {"contains_phrase": "tasks"}
         # Check if there are more tasks than shown
         if "(+" in obs1:
             act2 = "list(due=today)"
             obs2, _ = env.step(act2)
-            finish = 'finish(msg="Here are your most pressing tasks.")'
+            if "No tasks found" in obs2:
+                finish = 'finish(msg="You have no tasks due today.")'
+            else:
+                finish = 'finish(msg="Here are your most pressing tasks.")'
             obs_f, _ = env.step(finish)
             return [(act1, obs1), (act2, obs2), (finish, obs_f)]
         else:
@@ -233,7 +258,7 @@ class Oracle:
                         act1 = f"done(id={tid})"
                     elif "delete" in goal or "remove" in goal:
                         act1 = f"delete(id={tid})"
-                    elif "priority" in goal or "change" in goal:
+                    elif "priority" in goal or "prio" in goal:
                         act1 = f"edit(id={tid}, field=priority, value=high)"
                     elif "tag" in goal:
                         act1 = f"edit(id={tid}, field=tag, value=work)"
@@ -262,6 +287,7 @@ class Oracle:
         act1 = f'find(q="{query}")'
         obs1, _ = env.step(act1)
 
+        info["expected_reply"] = {"contains_phrase": "which"}
         ask = 'ask(msg="Which one do you mean?")'
         obs_a, _ = env.step(ask)
         return [(act1, obs1), (ask, obs_a)]
@@ -269,6 +295,7 @@ class Oracle:
     # ── Tier 8: Out of scope ──────────────────────────────────────────────
 
     def _solve_out_of_scope(self, info, env):
+        info["expected_reply"] = {"contains_phrase": "sorry"}
         finish = 'finish(msg="Sorry, I can only manage tasks.")'
         obs, _ = env.step(finish)
         return [(finish, obs)]

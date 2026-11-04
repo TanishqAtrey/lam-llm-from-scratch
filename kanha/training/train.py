@@ -34,39 +34,47 @@ class TokenDataset:
     Returns fixed-length sequences for causal LM training.
 
     Supports train/val splitting: pass split='train' or split='val'
-    with a val_fraction (default 0.1) to carve out a held-out set.
+    with a val_fraction (default 0.05). Splits sequences evenly across the
+    entire dataset so that all sub-corpora (web, textbooks, code) are
+    represented in validation without discarding tokens from training.
     """
 
     def __init__(self, data_path: str, seq_len: int,
-                 split: str = "all", val_fraction: float = 0.1):
-        full_data = np.load(data_path, mmap_mode="r")
+                 split: str = "all", val_fraction: float = 0.05):
+        self.data = np.load(data_path, mmap_mode="r")
         self.seq_len = seq_len
-
-        n_total = len(full_data)
-        val_size = int(n_total * val_fraction)
-
-        if split == "val":
-            self.data = full_data[:val_size]
-        elif split == "train":
-            self.data = full_data[val_size:]
-        else:
-            self.data = full_data
-
         self.n_tokens = len(self.data)
-        self.n_sequences = self.n_tokens // (seq_len + 1)
-        log.info(f"Dataset [{split}]: {self.n_tokens:,} tokens → {self.n_sequences:,} sequences")
+
+        step = seq_len
+        max_start = self.n_tokens - seq_len - 1
+        if max_start <= 0:
+            raise ValueError(f"Dataset has too few tokens ({self.n_tokens}) for sequence length {seq_len}")
+
+        all_starts = np.arange(0, max_start, step, dtype=np.int64)
+        n_seqs = len(all_starts)
+
+        if split == "all" or val_fraction <= 0.0:
+            self.indices = all_starts
+        else:
+            stride = max(2, int(round(1.0 / val_fraction)))
+            is_val = np.zeros(n_seqs, dtype=bool)
+            is_val[::stride] = True
+            if split == "val":
+                self.indices = all_starts[is_val]
+            else:  # "train"
+                self.indices = all_starts[~is_val]
+
+        self.n_sequences = len(self.indices)
+        log.info(f"Dataset [{split}]: {self.n_sequences:,} sequences across {self.n_tokens:,} total tokens")
 
     def __len__(self):
         return self.n_sequences
 
     def get_batch(self, batch_size: int, device: torch.device):
         """Returns a random batch of (input_ids, targets)."""
-        max_start = self.n_tokens - self.seq_len - 1
-        if max_start <= 0:
-            raise ValueError(f"Dataset has too few tokens ({self.n_tokens}) for sequence length {self.seq_len}")
-        indices = np.random.randint(0, max_start, size=batch_size)
-        x = np.stack([self.data[i:i + self.seq_len] for i in indices])
-        y = np.stack([self.data[i + 1:i + self.seq_len + 1] for i in indices])
+        idx_samples = np.random.choice(self.indices, size=batch_size, replace=True)
+        x = np.stack([self.data[i : i + self.seq_len] for i in idx_samples])
+        y = np.stack([self.data[i + 1 : i + self.seq_len + 1] for i in idx_samples])
         return (
             torch.tensor(x, dtype=torch.long, device=device),
             torch.tensor(y, dtype=torch.long, device=device),

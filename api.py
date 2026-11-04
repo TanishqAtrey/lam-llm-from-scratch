@@ -28,6 +28,7 @@ class ChatRequest(BaseModel):
     message: Optional[str] = None
     prompt: Optional[str] = None
     stream: Optional[bool] = False
+    session_id: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
@@ -83,7 +84,11 @@ def _resolve_model_path(model_path: Optional[str] = None) -> str:
     return "models/finetuned/sft_final.pt"
 
 
-def create_app(model_path: Optional[str] = None, index_dir: Optional[str] = None) -> FastAPI:
+def create_app(
+    model_path: Optional[str] = None,
+    lam_model_path: Optional[str] = None,
+    index_dir: Optional[str] = None,
+) -> FastAPI:
     resolved_path = _resolve_model_path(model_path)
 
     app = FastAPI(
@@ -92,16 +97,10 @@ def create_app(model_path: Optional[str] = None, index_dir: Optional[str] = None
         version="0.1.0",
     )
 
-    # Lazy or immediate engine loading
+    # Strictly lazy engine loading to prevent double-loading at import time
     _engine: Optional[InferenceEngine] = None
-    if os.path.exists(resolved_path):
-        try:
-            _engine = InferenceEngine.from_pretrained(
-                model_path=resolved_path,
-                index_dir=index_dir,
-            )
-        except Exception as e:
-            log.warning(f"Deferred engine loading: failed to pre-load from '{resolved_path}': {e}")
+    _lam_model = None
+    _sessions: dict = {}
 
     def get_engine() -> InferenceEngine:
         nonlocal _engine
@@ -117,12 +116,33 @@ def create_app(model_path: Optional[str] = None, index_dir: Optional[str] = None
             )
         return _engine
 
+    def get_lam_model(base_engine: InferenceEngine):
+        nonlocal _lam_model
+        if _lam_model is None:
+            lam_path = lam_model_path or os.getenv("KANHA_LAM_MODEL")
+            if not lam_path:
+                for candidate in ["models/lam/lam_final.pt", "models/lam/lam_sft.pt"]:
+                    if os.path.exists(candidate):
+                        lam_path = candidate
+                        break
+            if lam_path and os.path.exists(lam_path):
+                try:
+                    from kanha.core.model import KanhaModel
+                    _lam_model = KanhaModel.from_pretrained(lam_path)
+                    log.info(f"Loaded dedicated LAM agent model from {lam_path}")
+                except Exception as e:
+                    log.warning(f"Could not load LAM model from {lam_path}: {e}")
+                    _lam_model = base_engine.model
+            else:
+                _lam_model = base_engine.model
+        return _lam_model
+
     @app.get("/health")
     def health():
         return {
             "status": "ok",
             "model": resolved_path,
-            "loaded": _engine is not None or os.path.exists(resolved_path),
+            "loaded": _engine is not None,
         }
 
     @app.post("/chat")
@@ -132,6 +152,22 @@ def create_app(model_path: Optional[str] = None, index_dir: Optional[str] = None
             raise HTTPException(status_code=400, detail="Message or prompt cannot be empty.")
         try:
             engine = get_engine()
+            # Session-isolated memory handling
+            if req.session_id:
+                from kanha.memory.short_term import ShortTermMemory
+                from kanha.utils.config import cfg
+                if req.session_id not in _sessions:
+                    _sessions[req.session_id] = ShortTermMemory(max_turns=cfg.memory.short_term_limit)
+                orig_mem = engine.memory
+                engine.memory = _sessions[req.session_id]
+                try:
+                    if req.stream:
+                        return StreamingResponse(engine.chat_stream(text), media_type="text/plain")
+                    response = engine.chat(text, stream=False)
+                    return ChatResponse(response=response)
+                finally:
+                    engine.memory = orig_mem
+
             if req.stream:
                 return StreamingResponse(engine.chat_stream(text), media_type="text/plain")
             response = engine.chat(text, stream=False)
@@ -143,8 +179,11 @@ def create_app(model_path: Optional[str] = None, index_dir: Optional[str] = None
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/reset")
-    def reset():
+    def reset(session_id: Optional[str] = None):
         try:
+            if session_id and session_id in _sessions:
+                _sessions[session_id].clear()
+                return {"status": f"session {session_id} memory cleared"}
             engine = get_engine()
             engine.reset_memory()
             return {"status": "memory cleared"}
@@ -161,29 +200,40 @@ def create_app(model_path: Optional[str] = None, index_dir: Optional[str] = None
             raise HTTPException(status_code=400, detail="Goal cannot be empty.")
         try:
             engine = get_engine()
+            lam_model = get_lam_model(engine)
             from kanha.lam.environment import TaskEnvironment
 
-            env = TaskEnvironment(task_store_path=req.tasks_path)
+            # Path traversal prevention: enforce sandbox path inside data/lam/
+            safe_base = os.path.abspath("data/lam")
+            os.makedirs(safe_base, exist_ok=True)
+            requested_path = os.path.abspath(req.tasks_path)
+            if not requested_path.startswith(safe_base):
+                base_name = os.path.basename(req.tasks_path)
+                safe_tasks_path = os.path.join(safe_base, base_name)
+            else:
+                safe_tasks_path = requested_path
+
+            env = TaskEnvironment(task_store_path=safe_tasks_path)
 
             if req.use_langgraph:
                 try:
                     from kanha.lam.langchain.graph import LangGraphTaskAgent
                     agent = LangGraphTaskAgent(
-                        model=engine.model,
+                        model=lam_model,
                         tokenizer=engine.tokenizer,
                         environment=env,
                     )
                 except ImportError:
                     from kanha.lam.agent import TaskAgent
                     agent = TaskAgent(
-                        model=engine.model,
+                        model=lam_model,
                         tokenizer=engine.tokenizer,
                         environment=env,
                     )
             else:
                 from kanha.lam.agent import TaskAgent
                 agent = TaskAgent(
-                    model=engine.model,
+                    model=lam_model,
                     tokenizer=engine.tokenizer,
                     environment=env,
                 )

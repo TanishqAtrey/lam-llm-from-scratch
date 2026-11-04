@@ -112,20 +112,30 @@ class SFTDataset(Dataset):
         if not any(l != -100 for l in labels) and len(labels) > 0:
             labels[-1] = full_ids[-1]
 
-        # ── Pad to max_len - 1 (since we removed one token by shifting) ──
-        seq_len = self.max_len - 1
-        pad_len = seq_len - len(input_ids)
-        if pad_len > 0:
-            input_ids = input_ids + [self.tokenizer.PAD_ID] * pad_len
-            labels = labels + [-100] * pad_len
-        else:
-            input_ids = input_ids[:seq_len]
-            labels = labels[:seq_len]
-
         return {
             "input_ids": torch.tensor(input_ids, dtype=torch.long),
             "labels": torch.tensor(labels, dtype=torch.long),
         }
+
+
+def sft_collate_fn(batch, pad_id=0):
+    """Dynamically pads each batch to its maximum sequence length instead of fixed 1023."""
+    max_len = max(len(x["input_ids"]) for x in batch)
+    b_input_ids = []
+    b_labels = []
+    for x in batch:
+        inp = x["input_ids"]
+        lbl = x["labels"]
+        pad_len = max_len - len(inp)
+        if pad_len > 0:
+            inp = torch.cat([inp, torch.full((pad_len,), pad_id, dtype=torch.long)])
+            lbl = torch.cat([lbl, torch.full((pad_len,), -100, dtype=torch.long)])
+        b_input_ids.append(inp)
+        b_labels.append(lbl)
+    return {
+        "input_ids": torch.stack(b_input_ids),
+        "labels": torch.stack(b_labels),
+    }
 
 
 # ── Validation helper ─────────────────────────────────────────────────────────
@@ -197,10 +207,12 @@ def sft_train(args):
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size,
         shuffle=True, drop_last=True, num_workers=0,
+        collate_fn=sft_collate_fn,
     )
     val_loader = DataLoader(
         val_dataset, batch_size=args.batch_size,
         shuffle=False, drop_last=False, num_workers=0,
+        collate_fn=sft_collate_fn,
     )
 
     log.info(f"Split: {train_size:,} train / {val_size:,} val samples")
@@ -219,9 +231,12 @@ def sft_train(args):
         betas=(0.9, 0.95),
     )
 
+    grad_accum_steps = getattr(args, "grad_accum_steps", None) or getattr(cfg.training, "grad_accum_steps", 4)
+    grad_accum_steps = max(1, int(grad_accum_steps))
+
     # ── Warmup + cosine schedule ──
-    total_steps = len(train_loader) * args.epochs
-    warmup_steps = min(100, total_steps // 10)
+    total_steps = math.ceil(len(train_loader) / grad_accum_steps) * args.epochs
+    warmup_steps = min(100, max(1, total_steps // 10))
 
     def lr_lambda(step):
         if step < warmup_steps:
@@ -238,15 +253,17 @@ def sft_train(args):
     patience_counter = 0
 
     log.info(f"SFT Training | epochs={args.epochs} | lr={args.lr} | "
-             f"batch_size={args.batch_size} | train={train_size:,} | val={val_size:,}")
-    log.info(f"Total steps: {total_steps:,} | Warmup: {warmup_steps} | Patience: {patience}")
+             f"batch_size={args.batch_size} | grad_accum={grad_accum_steps} | "
+             f"train={train_size:,} | val={val_size:,}")
+    log.info(f"Total optim steps: {total_steps:,} | Warmup: {warmup_steps} | Patience: {patience}")
 
     for epoch in range(args.epochs):
         epoch_loss = 0
         n_batches = 0
+        optimizer.zero_grad()
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs}")
-        for batch in pbar:
+        for batch_idx, batch in enumerate(pbar):
             input_ids = batch["input_ids"].to(device)
             labels = batch["labels"].to(device)
             if not (labels != -100).any():
@@ -255,12 +272,15 @@ def sft_train(args):
             # Forward
             logits, loss, _ = model(input_ids, targets=labels)
 
-            # Backward
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.training.grad_clip)
-            optimizer.step()
-            scheduler.step()
-            optimizer.zero_grad()
+            # Backward with gradient accumulation
+            loss_scaled = loss / grad_accum_steps
+            loss_scaled.backward()
+
+            if (batch_idx + 1) % grad_accum_steps == 0 or (batch_idx + 1) == len(train_loader):
+                torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.training.grad_clip)
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
 
             epoch_loss += loss.item()
             n_batches += 1

@@ -28,7 +28,7 @@ class TrajectoryGenerator:
                     'tier7': 0.10, 'tier8': 0.05,
                 }
             
-    def _sample_world(self, rng, min_size=0, max_size=12, require_titles=None) -> list[dict]:
+    def _sample_world(self, rng, min_size=0, max_size=12, require_titles=None, unique_titles=False) -> list[dict]:
         size = rng.randint(min_size, max_size)
         tasks = []
         
@@ -41,13 +41,26 @@ class TrajectoryGenerator:
                     'tag': rng.choice(TAG_POOL)
                 })
         
-        while len(tasks) < size:
-            tasks.append({
-                'title': rng.choice(TITLE_POOL),
-                'due': rng.choice(DUE_POOL),
-                'prio': rng.choice(PRIO_POOL),
-                'tag': rng.choice(TAG_POOL)
-            })
+        if unique_titles:
+            available_titles = [t for t in TITLE_POOL if not any(existing['title'] == t for existing in tasks)]
+            needed = size - len(tasks)
+            if needed > 0 and available_titles:
+                chosen = rng.sample(available_titles, min(needed, len(available_titles)))
+                for title in chosen:
+                    tasks.append({
+                        'title': title,
+                        'due': rng.choice(DUE_POOL),
+                        'prio': rng.choice(PRIO_POOL),
+                        'tag': rng.choice(TAG_POOL)
+                    })
+        else:
+            while len(tasks) < size:
+                tasks.append({
+                    'title': rng.choice(TITLE_POOL),
+                    'due': rng.choice(DUE_POOL),
+                    'prio': rng.choice(PRIO_POOL),
+                    'tag': rng.choice(TAG_POOL)
+                })
             
         return tasks
         
@@ -59,6 +72,7 @@ class TrajectoryGenerator:
         per_tier = {t: 0 for t in tiers}
         total = 0
         skipped = 0
+        seen_trajectories = set()
         
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
         
@@ -82,6 +96,7 @@ class TrajectoryGenerator:
                         self.rng,
                         min_size=TEMPLATES[tier][0].get('min_world_size', 0),
                         require_titles=require_titles,
+                        unique_titles=(tier == 'tier3'),
                     )
                     for t in world_tasks:
                         store.add(title=t['title'], due=t['due'], prio=t['prio'], tag=t['tag'])
@@ -104,6 +119,13 @@ class TrajectoryGenerator:
                         continue
                     
                     steps = [{'action': act, 'observation': obs} for act, obs in steps_tuples]
+
+                    # Deduplication guard: avoid writing exact duplicate trajectories
+                    traj_signature = (goal, tuple(s['action'] for s in steps))
+                    if traj_signature in seen_trajectories:
+                        skipped += 1
+                        continue
+                    seen_trajectories.add(traj_signature)
                     
                     traj = {
                         'goal': goal,
@@ -111,7 +133,8 @@ class TrajectoryGenerator:
                         'steps': steps,
                         'tier': info['tier'],
                         'template_id': f"{tier}_{info.get('goal', info.get('solver', 'unknown'))}",
-                        'expected_state': env.get_state()
+                        'expected_state': env.get_state(),
+                        'expected_reply': info.get('expected_reply'),
                     }
                     
                     f.write(json.dumps(traj) + '\n')
@@ -129,7 +152,8 @@ def split_data(input_path, train_path, val_path, test_path, val_ratio=0.1, test_
         
     trajectories = [json.loads(line) for line in lines]
     
-    templates = list(set(t['template_id'] for t in trajectories))
+    # Sort templates before shuffling to ensure exact deterministic reproducibility across hash seeds
+    templates = sorted(set(t['template_id'] for t in trajectories))
     rng.shuffle(templates)
     
     holdout_idx = int(len(templates) * (1.0 - holdout_templates))

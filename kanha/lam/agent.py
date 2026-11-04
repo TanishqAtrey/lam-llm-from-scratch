@@ -192,6 +192,7 @@ class TaskAgent:
             max_new_tokens=self._gen_max_tokens,
             temperature=temperature,
             top_k=k,
+            repetition_penalty=1.0,  # CRITICAL: 1.0 allows copying exact task IDs and titles from context
         )
         return self._clean_action(raw), confidence
     

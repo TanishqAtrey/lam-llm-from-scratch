@@ -37,11 +37,63 @@ from kanha.core.model import KanhaModel
 from kanha.core.tokenizer import KanhaTokenizer
 from kanha.lam.environment import TaskEnvironment
 from kanha.lam.agent import TaskAgent
+from kanha.lam.task_store import TaskStore
 from kanha.lam.trajectory import format_step_prompt
 from kanha.utils.helpers import ensure_dir, get_device
 from kanha.utils.logging import get_logger
 
 log = get_logger("mine_dpo")
+
+
+def _canonical_task(t: dict, reference_date: str) -> tuple:
+    due = t.get('due')
+    if due:
+        due = TaskStore.resolve_symbolic_date(due, reference_date)
+    return (
+        t.get('title') or '',
+        due or '',
+        t.get('priority', t.get('prio', 'med')) or 'med',
+        t.get('tag') or '',
+        t.get('status', 'todo') or 'todo',
+    )
+
+
+def _is_true_success(case: dict, result, env: TaskEnvironment, reference_date: str) -> bool:
+    """Verifies that the trajectory actually achieved true task success."""
+    if result.aborted:
+        return False
+
+    final_state = env.get_state()
+    final_tasks = list(final_state.values()) if isinstance(final_state, dict) else final_state
+    expected_state = case.get('expected_state', [])
+    expected_tasks = list(expected_state.values()) if isinstance(expected_state, dict) else expected_state
+
+    def canonicalize(tasks):
+        return sorted([_canonical_task(t, reference_date) for t in tasks])
+
+    if canonicalize(expected_tasks) != canonicalize(final_tasks):
+        return False
+
+    # Check side effects
+    initial_tasks = case.get('world', [])
+    init_set = set(_canonical_task(t, reference_date) for t in (list(initial_tasks.values()) if isinstance(initial_tasks, dict) else initial_tasks))
+    final_set = set(_canonical_task(t, reference_date) for t in final_tasks)
+    exp_set = set(_canonical_task(t, reference_date) for t in expected_tasks)
+    untouched_expected = init_set & exp_set
+    if (untouched_expected - final_set) or (final_set - (init_set | exp_set)):
+        return False
+
+    expected_reply = case.get('expected_reply')
+    if expected_reply:
+        reply = (result.final_message or "").lower()
+        if 'contains_number' in expected_reply and str(expected_reply['contains_number']) not in reply:
+            return False
+        if 'contains_title' in expected_reply and str(expected_reply['contains_title']).lower() not in reply:
+            return False
+        if 'contains_phrase' in expected_reply and str(expected_reply['contains_phrase']).lower() not in reply:
+            return False
+
+    return True
 
 
 @dataclass
@@ -224,7 +276,7 @@ def mine_dpo_pairs(args):
             env.reset(initial_tasks=world)
             result = agent.run(goal)
 
-            if result.success and not result.aborted:
+            if _is_true_success(case, result, env, reference_date):
                 successes[idx] = result
             else:
                 failures[idx] = result
@@ -239,7 +291,7 @@ def mine_dpo_pairs(args):
             agent.CONFIDENCE_THRESHOLD = old_threshold
             agent._gen_top_k = old_top_k
 
-            if result2.success and not result2.aborted:
+            if _is_true_success(case, result2, env, reference_date):
                 if idx not in successes:
                     successes[idx] = result2
             else:

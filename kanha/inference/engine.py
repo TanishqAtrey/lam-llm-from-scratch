@@ -120,12 +120,20 @@ class InferenceEngine:
         log.info("InferenceEngine ready")
         return engine
 
-    def chat_stream(self, user_message: str, memory: Optional[ShortTermMemory] = None):
+    def chat_stream(
+        self,
+        user_message: str,
+        memory: Optional[ShortTermMemory] = None,
+        temperature: Optional[float] = None,
+        max_new_tokens: Optional[int] = None,
+    ):
         """
         Streaming generator that yields response tokens and tool outputs as they arrive.
         Updates conversation memory upon completion.
         """
         mem = memory if memory is not None else self.memory
+        gen_temp = temperature if temperature is not None else cfg.inference.temperature
+        gen_max_tokens = max_new_tokens if max_new_tokens is not None else cfg.inference.max_new_tokens
 
         # 0. Safety filter on user prompt before generation begins
         try:
@@ -174,8 +182,8 @@ class InferenceEngine:
                     self.model,
                     self.tokenizer,
                     curr_prompt,
-                    max_new_tokens=cfg.inference.max_new_tokens,
-                    temperature=cfg.inference.temperature,
+                    max_new_tokens=gen_max_tokens,
+                    temperature=gen_temp,
                     top_k=cfg.inference.top_k,
                     top_p=cfg.inference.top_p,
                     repetition_penalty=cfg.inference.repetition_penalty,
@@ -215,12 +223,12 @@ class InferenceEngine:
                 self.model,
                 self.tokenizer,
                 prompt,
-                max_new_tokens=cfg.inference.max_new_tokens,
-                temperature=cfg.inference.temperature,
+                max_new_tokens=gen_max_tokens,
+                temperature=gen_temp,
                 top_k=cfg.inference.top_k,
                 top_p=cfg.inference.top_p,
                 repetition_penalty=cfg.inference.repetition_penalty,
-                stop_sequences=["\n### Instruction:", "### Instruction:", "### Conversation History:"],
+                stop_sequences=["\n### Instruction:", "### Instruction:", "### Conversation History:", "\nUser:", "\nHuman:"],
                 device=self.device,
             ):
                 response_parts.append(token_text)
@@ -250,7 +258,14 @@ class InferenceEngine:
         mem.add("user", user_message)
         mem.add("assistant", final_response)
 
-    def chat(self, user_message: str, stream: bool = False, memory: Optional[ShortTermMemory] = None) -> str:
+    def chat(
+        self,
+        user_message: str,
+        stream: bool = False,
+        memory: Optional[ShortTermMemory] = None,
+        temperature: Optional[float] = None,
+        max_new_tokens: Optional[int] = None,
+    ) -> str:
         """
         Main chat method — takes a user message and returns the model's response.
 
@@ -263,14 +278,18 @@ class InferenceEngine:
           6. Update memory
 
         Args:
-            user_message : the user's raw text input
-            stream       : if True, prints tokens as they're generated
-            memory       : optional explicit ShortTermMemory to use instead of self.memory
+            user_message   : the user's raw text input
+            stream         : if True, prints tokens as they're generated
+            memory         : optional explicit ShortTermMemory to use instead of self.memory
+            temperature    : sampling temperature (defaults to cfg.inference.temperature)
+            max_new_tokens : max new tokens (defaults to cfg.inference.max_new_tokens)
 
         Returns:
             The model's response string
         """
         mem = memory if memory is not None else self.memory
+        gen_temp = temperature if temperature is not None else cfg.inference.temperature
+        gen_max_tokens = max_new_tokens if max_new_tokens is not None else cfg.inference.max_new_tokens
 
         # 0. Safety filter on user prompt before generation begins
         try:
@@ -287,7 +306,7 @@ class InferenceEngine:
 
         if stream:
             response_parts = []
-            for chunk in self.chat_stream(user_message, memory=mem):
+            for chunk in self.chat_stream(user_message, memory=mem, temperature=gen_temp, max_new_tokens=gen_max_tokens):
                 print(chunk, end="", flush=True)
                 response_parts.append(chunk)
             print()  # newline after streaming
@@ -327,8 +346,8 @@ class InferenceEngine:
                     self.model,
                     self.tokenizer,
                     curr_prompt,
-                    max_new_tokens=cfg.inference.max_new_tokens,
-                    temperature=cfg.inference.temperature,
+                    max_new_tokens=gen_max_tokens,
+                    temperature=gen_temp,
                     top_k=cfg.inference.top_k,
                     top_p=cfg.inference.top_p,
                     repetition_penalty=cfg.inference.repetition_penalty,
@@ -353,12 +372,12 @@ class InferenceEngine:
                 self.model,
                 self.tokenizer,
                 prompt,
-                max_new_tokens=cfg.inference.max_new_tokens,
-                temperature=cfg.inference.temperature,
+                max_new_tokens=gen_max_tokens,
+                temperature=gen_temp,
                 top_k=cfg.inference.top_k,
                 top_p=cfg.inference.top_p,
                 repetition_penalty=cfg.inference.repetition_penalty,
-                stop_sequences=["\n### Instruction:", "### Instruction:", "### Conversation History:"],
+                stop_sequences=["\n### Instruction:", "### Instruction:", "### Conversation History:", "\nUser:", "\nHuman:"],
                 device=self.device,
             )
 

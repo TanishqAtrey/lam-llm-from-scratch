@@ -17,11 +17,17 @@ class ShortTermMemory:
         self.max_turns = max_turns
         self._turns = deque(maxlen=max_turns)
 
-    def add(self, role: str, content: str):
-        """Add a turn to memory. role is 'user' or 'assistant'."""
+    def add(self, role: str, content: str, max_chars_per_turn: int = 500):
+        """
+        Add a turn to memory. role is 'user' or 'assistant'.
+        Truncates excessively long individual turns (e.g. runaway generation)
+        to prevent overwhelming context memory in future turns.
+        """
+        if content and len(content) > max_chars_per_turn:
+            content = content[:max_chars_per_turn].rstrip() + "..."
         self._turns.append({"role": role, "content": content})
 
-    def format(self) -> str:
+    def format(self, max_total_chars: int = 2000) -> str:
         """Formats conversation history as a string for the prompt."""
         lines = []
         for turn in self._turns:
@@ -29,7 +35,13 @@ class ShortTermMemory:
                 lines.append(f"User: {turn['content']}")
             else:
                 lines.append(f"Assistant: {turn['content']}")
-        return "\n".join(lines)
+        formatted = "\n".join(lines)
+        if len(formatted) > max_total_chars:
+            # Drop older turns if total history exceeds budget
+            while len(lines) > 2 and len("\n".join(lines)) > max_total_chars:
+                lines.pop(0)
+            formatted = "\n".join(lines)
+        return formatted
 
     def get_context(self, mode: str = "full") -> str:
         """Returns formatted context. mode='full' or 'summary'."""

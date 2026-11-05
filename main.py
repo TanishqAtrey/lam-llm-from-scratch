@@ -34,6 +34,10 @@ def main():
     chat_p.add_argument("--index",  default=None)
     chat_p.add_argument("--stream", action="store_true")
     chat_p.add_argument("--tools",  action="store_true")
+    chat_p.add_argument("--temp", "--temperature", dest="temperature", type=float, default=None,
+                        help="Sampling temperature (default: from config, 0.2)")
+    chat_p.add_argument("--max_tokens", "--max_new_tokens", dest="max_new_tokens", type=int, default=None,
+                        help="Max new tokens to generate (default: from config, 160)")
 
     # ── train ─────────────────────────────────────────────────────────────
     train_p = sub.add_parser("train", aliases=["pretrain"], help="Pre-train from scratch")

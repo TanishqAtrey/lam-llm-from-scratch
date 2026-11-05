@@ -80,12 +80,14 @@ def run_cli(args):
 
         # Generate response
         try:
+            temp = getattr(args, "temperature", None)
+            max_tok = getattr(args, "max_new_tokens", None)
             if args.stream:
                 # Streaming mode — tokens printed inside engine
-                response = engine.chat(user_input, stream=True)
+                response = engine.chat(user_input, stream=True, temperature=temp, max_new_tokens=max_tok)
             else:
                 with console.status("[bold cyan]Thinking...[/bold cyan]"):
-                    response = engine.chat(user_input, stream=False)
+                    response = engine.chat(user_input, stream=False, temperature=temp, max_new_tokens=max_tok)
                 console.print(Panel(
                     Text(response, style="white"),
                     title="[bold magenta]KANHA[/bold magenta]",
@@ -101,5 +103,7 @@ if __name__ == "__main__":
     parser.add_argument("--index",  default=None,  help="Path to FAISS index directory")
     parser.add_argument("--stream", action="store_true", help="Enable streaming output")
     parser.add_argument("--tools",  action="store_true", help="Enable agent tools")
+    parser.add_argument("--temp", "--temperature", dest="temperature", type=float, default=None, help="Sampling temperature (e.g. 0.2)")
+    parser.add_argument("--max_tokens", "--max_new_tokens", dest="max_new_tokens", type=int, default=None, help="Maximum new tokens to generate")
     args = parser.parse_args()
     run_cli(args)

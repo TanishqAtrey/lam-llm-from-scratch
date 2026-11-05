@@ -22,6 +22,45 @@ log = get_logger(__name__)
 
 # ─── Sampling helpers ─────────────────────────────────────────────────────────
 
+DEFAULT_STOP_SEQUENCES = [
+    "\n### Instruction:",
+    "### Instruction:",
+    "### Conversation History:",
+    "\nUser:",
+    "\nHuman:",
+]
+
+
+def _has_sentence_repetition(text: str) -> bool:
+    """
+    Detects if the generated text is trapped in a repetitive sentence loop.
+    Returns True if:
+      - The same sentence (>15 chars) is repeated 2 times consecutively, OR
+      - Any sentence (>15 chars) appears 3 or more times.
+    """
+    import re
+    if len(text) < 30:
+        return False
+    sentences = [s.strip().lower() for s in re.split(r'[\.\n\?!]+', text) if len(s.strip()) > 15]
+    if len(sentences) >= 2 and sentences[-1] == sentences[-2]:
+        return True
+    if len(sentences) >= 3 and sentences.count(sentences[-1]) >= 3:
+        return True
+    return False
+
+
+def _clean_repetitive_tail(text: str) -> str:
+    """If the trailing sentence is identical to the preceding sentence, trim the duplicate."""
+    import re
+    sentences = re.split(r'(?<=[.!?\n])\s+', text)
+    if len(sentences) >= 2:
+        last = sentences[-1].strip().lower()
+        prev = sentences[-2].strip().lower()
+        if len(last) > 15 and last == prev:
+            return " ".join(sentences[:-1]).strip()
+    return text
+
+
 def top_k_filter(logits: torch.Tensor, k: int) -> torch.Tensor:
     """Zeros out all logits except the top-k."""
     if k <= 0 or k >= logits.shape[-1]:
@@ -179,6 +218,8 @@ def generate(
     if stop_tokens is None:
         stop_tokens = [tokenizer.EOS_ID]
 
+    effective_stop_sequences = list(stop_sequences) if stop_sequences is not None else list(DEFAULT_STOP_SEQUENCES)
+
     model.eval()
     model.to(device)
 
@@ -200,9 +241,10 @@ def generate(
         logits, _, kv_caches = model(input_tensor, kv_caches=kv_caches, offset=cur_pos)
         cur_pos += input_tensor.shape[1]
 
-        # Repetition penalty: only penalize tokens generated after prompt
-        if repetition_penalty != 1.0 and len(generated) > prompt_len:
-            ctx = torch.tensor([generated[prompt_len:]], dtype=torch.long, device=device)
+        # Repetition penalty: penalize both new tokens and recent context history
+        if repetition_penalty != 1.0 and len(generated) > 1:
+            penalty_start = max(0, prompt_len - 128)
+            ctx = torch.tensor([generated[penalty_start:]], dtype=torch.long, device=device)
             logits[:, -1, :] = apply_repetition_penalty(
                 logits[:, -1, :], ctx, repetition_penalty,
             )
@@ -214,9 +256,11 @@ def generate(
         if next_id in stop_tokens:
             break
 
-        if stop_sequences:
+        if effective_stop_sequences or len(generated) > prompt_len + 10:
             current_text = tokenizer.decode(generated[prompt_len:], skip_special=True)
-            if any(seq in current_text for seq in stop_sequences):
+            if effective_stop_sequences and any(seq in current_text for seq in effective_stop_sequences):
+                break
+            if _has_sentence_repetition(current_text):
                 break
 
         # Feed only the new token — KV cache handles the rest
@@ -226,10 +270,11 @@ def generate(
     # This is the correct fix vs. fragile startswith() string stripping
     new_ids = generated[prompt_len:]
     text = tokenizer.decode(new_ids, skip_special=True)
-    if stop_sequences:
-        matched_indices = [text.find(seq) for seq in stop_sequences if seq in text]
+    if effective_stop_sequences:
+        matched_indices = [text.find(seq) for seq in effective_stop_sequences if seq in text]
         if matched_indices:
             text = text[:min(matched_indices)]
+    text = _clean_repetitive_tail(text)
     return text
 
 
@@ -279,6 +324,8 @@ def generate_with_confidence(
     if stop_tokens is None:
         stop_tokens = [tokenizer.EOS_ID]
 
+    effective_stop_sequences = list(stop_sequences) if stop_sequences is not None else list(DEFAULT_STOP_SEQUENCES)
+
     model.eval()
     model.to(device)
 
@@ -300,9 +347,10 @@ def generate_with_confidence(
         raw_last_logits = logits[:, -1, :].clone()
         raw_probs = F.softmax(raw_last_logits, dim=-1)
 
-        # Repetition penalty: only penalize tokens generated after prompt
-        if repetition_penalty != 1.0 and len(generated) > prompt_len:
-            ctx = torch.tensor([generated[prompt_len:]], dtype=torch.long, device=device)
+        # Repetition penalty: penalize both new tokens and recent context history
+        if repetition_penalty != 1.0 and len(generated) > 1:
+            penalty_start = max(0, prompt_len - 128)
+            ctx = torch.tensor([generated[penalty_start:]], dtype=torch.long, device=device)
             logits[:, -1, :] = apply_repetition_penalty(
                 logits[:, -1, :], ctx, repetition_penalty,
             )
@@ -319,9 +367,11 @@ def generate_with_confidence(
         if next_id in stop_tokens:
             break
 
-        if stop_sequences:
+        if effective_stop_sequences or len(generated) > prompt_len + 10:
             current_text = tokenizer.decode(generated[prompt_len:], skip_special=True)
-            if any(seq in current_text for seq in stop_sequences):
+            if effective_stop_sequences and any(seq in current_text for seq in effective_stop_sequences):
+                break
+            if _has_sentence_repetition(current_text):
                 break
 
         input_tensor = next_token
@@ -329,16 +379,17 @@ def generate_with_confidence(
     # Decode only new tokens
     new_ids = generated[prompt_len:]
     text = tokenizer.decode(new_ids, skip_special=True)
-    if stop_sequences:
-        matched_indices = [text.find(seq) for seq in stop_sequences if seq in text]
+    if effective_stop_sequences:
+        matched_indices = [text.find(seq) for seq in effective_stop_sequences if seq in text]
         if matched_indices:
             text = text[:min(matched_indices)]
+    text = _clean_repetitive_tail(text)
 
     # Exclude stop tokens and stop sequences from confidence calculations
     # so confidence accurately reflects only the generated content tokens
     if next_id in stop_tokens and len(per_token_confs) > 1:
         per_token_confs.pop()
-    elif stop_sequences and len(per_token_confs) > 1:
+    elif effective_stop_sequences and len(per_token_confs) > 1:
         full_decoded = tokenizer.decode(new_ids, skip_special=True)
         if len(text) < len(full_decoded):
             trimmed_ids = tokenizer.encode(text, add_bos=False, add_eos=False)
@@ -424,6 +475,8 @@ def generate_stream(
     if stop_tokens is None:
         stop_tokens = [tokenizer.EOS_ID]
 
+    effective_stop_sequences = list(stop_sequences) if stop_sequences is not None else list(DEFAULT_STOP_SEQUENCES)
+
     model.eval()
     model.to(device)
 
@@ -443,9 +496,10 @@ def generate_stream(
         logits, _, kv_caches = model(input_tensor, kv_caches=kv_caches, offset=cur_pos)
         cur_pos += input_tensor.shape[1]
 
-        # Repetition penalty: only penalize new tokens generated so far
-        if repetition_penalty != 1.0 and new_ids:
-            ctx = torch.tensor([new_ids], dtype=torch.long, device=device)
+        # Repetition penalty: penalize both new tokens and recent context history
+        if repetition_penalty != 1.0 and len(generated) > 1:
+            penalty_start = max(0, len(input_ids) - 128)
+            ctx = torch.tensor([generated[penalty_start:]], dtype=torch.long, device=device)
             logits[:, -1, :] = apply_repetition_penalty(
                 logits[:, -1, :], ctx, repetition_penalty,
             )
@@ -462,8 +516,8 @@ def generate_stream(
 
         if not full_text.endswith("\ufffd"):
             # Check for complete stop sequence match
-            if stop_sequences and any(seq in full_text for seq in stop_sequences):
-                earliest_idx = min(full_text.find(seq) for seq in stop_sequences if seq in full_text)
+            if effective_stop_sequences and any(seq in full_text for seq in effective_stop_sequences):
+                earliest_idx = min(full_text.find(seq) for seq in effective_stop_sequences if seq in full_text)
                 commit_text = full_text[:earliest_idx]
                 if len(commit_text) > len(prev_text):
                     diff = commit_text[len(prev_text):]
@@ -473,8 +527,13 @@ def generate_stream(
                 stopped_by_seq = True
                 break
 
+            # Check for runaway sentence loops
+            if _has_sentence_repetition(full_text):
+                stopped_by_seq = True
+                break
+
             # Buffer partial prefixes of any stop sequences
-            prefix_len = _find_stop_prefix_len(full_text, stop_sequences) if stop_sequences else 0
+            prefix_len = _find_stop_prefix_len(full_text, effective_stop_sequences) if effective_stop_sequences else 0
             safe_len = len(full_text) - prefix_len
             if safe_len > len(prev_text):
                 diff = full_text[len(prev_text):safe_len]
@@ -486,13 +545,14 @@ def generate_stream(
 
     if new_ids and not stopped_by_seq:
         final_full = tokenizer.decode(new_ids, skip_special=True)
-        if stop_sequences and any(seq in final_full for seq in stop_sequences):
-            earliest_idx = min(final_full.find(seq) for seq in stop_sequences if seq in final_full)
+        if effective_stop_sequences and any(seq in final_full for seq in effective_stop_sequences):
+            earliest_idx = min(final_full.find(seq) for seq in effective_stop_sequences if seq in final_full)
             final_full = final_full[:earliest_idx]
-        elif stop_sequences:
-            prefix_len = _find_stop_prefix_len(final_full, stop_sequences)
+        elif effective_stop_sequences:
+            prefix_len = _find_stop_prefix_len(final_full, effective_stop_sequences)
             if prefix_len > 0:
                 final_full = final_full[:-prefix_len]
+        final_full = _clean_repetitive_tail(final_full)
         final_diff = final_full[len(prev_text):]
         if final_diff and "\ufffd" not in final_diff:
             yield final_diff

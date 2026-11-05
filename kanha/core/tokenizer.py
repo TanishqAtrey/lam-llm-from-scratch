@@ -38,6 +38,26 @@ class KanhaTokenizer:
             model_path = cfg.paths.tokenizer_model
 
         if not os.path.exists(model_path):
+            # Auto-search in common input locations (e.g. Kaggle /kaggle/input)
+            for search_root in ["/kaggle/input", "..", "."]:
+                if os.path.exists(search_root):
+                    for dirpath, _, filenames in os.walk(search_root):
+                        if "tokenizer.model" in filenames:
+                            found = os.path.join(dirpath, "tokenizer.model")
+                            log.info(f"Auto-located tokenizer at {found}")
+                            try:
+                                dest = cfg.paths.tokenizer_model
+                                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                                import shutil
+                                shutil.copy2(found, dest)
+                                model_path = dest
+                            except Exception:
+                                model_path = found
+                            break
+                if os.path.exists(model_path):
+                    break
+
+        if not os.path.exists(model_path):
             raise FileNotFoundError(
                 f"Tokenizer model not found at: {model_path}\n"
                 f"Run: python scripts/train_tokenizer.py"

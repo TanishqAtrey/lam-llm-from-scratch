@@ -300,6 +300,7 @@ def is_valid_sample(instruction: str, response: str, tokenizer: KanhaTokenizer, 
 def prepare_sft_dataset(
     output_path: str = "data/processed/sft_250k.jsonl",
     val_output_path: str = "data/processed/sft_val.jsonl",
+    tokenizer_path: str = None,
     seed: int = 42,
 ):
     from datasets import load_dataset
@@ -308,7 +309,7 @@ def prepare_sft_dataset(
     log.info("  STARTING KANHA 250K SFT DATASET PREPARATION")
     log.info("=" * 65)
 
-    tokenizer = KanhaTokenizer()
+    tokenizer = KanhaTokenizer(tokenizer_path)
     rng = random.Random(seed)
     seen_prompts = set()
 
@@ -497,11 +498,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Prepare KANHA 250K SFT dataset mix")
     parser.add_argument("--output", default="data/processed/sft_250k.jsonl", help="Output train JSONL path")
     parser.add_argument("--val_output", default="data/processed/sft_val.jsonl", help="Output val JSONL path")
+    parser.add_argument("--tokenizer", default=None, help="Path to tokenizer.model")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for sampling and shuffling")
     args = parser.parse_args()
 
     prepare_sft_dataset(
         output_path=args.output,
         val_output_path=args.val_output,
+        tokenizer_path=args.tokenizer,
         seed=args.seed,
     )

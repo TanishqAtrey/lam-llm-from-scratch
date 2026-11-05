@@ -330,6 +330,20 @@ def generate_with_confidence(
             if idx != -1:
                 text = text[:idx]
 
+    # Exclude stop tokens and stop sequences from confidence calculations
+    # so confidence accurately reflects only the generated content tokens
+    if next_id in stop_tokens and len(per_token_confs) > 1:
+        per_token_confs.pop()
+    elif stop_sequences and len(per_token_confs) > 1:
+        full_decoded = tokenizer.decode(new_ids, skip_special=True)
+        if len(text) < len(full_decoded):
+            trimmed_ids = tokenizer.encode(text, add_bos=False, add_eos=False)
+            retained_len = min(len(trimmed_ids), len(per_token_confs))
+            if retained_len > 0:
+                per_token_confs = per_token_confs[:retained_len]
+            else:
+                per_token_confs.pop()
+
     import math
     mean_confidence = sum(per_token_confs) / max(len(per_token_confs), 1)
     min_confidence = min(per_token_confs) if per_token_confs else 1.0
@@ -346,6 +360,21 @@ def generate_with_confidence(
         chosen_conf = geom_confidence
 
     return text, chosen_conf, per_token_confs
+
+
+def _find_stop_prefix_len(text: str, stop_sequences: list[str]) -> int:
+    """Finds the length of the longest suffix of `text` that is a non-empty prefix of any stop sequence."""
+    if not text or not stop_sequences:
+        return 0
+    max_prefix_len = 0
+    for seq in stop_sequences:
+        max_check = min(len(text), len(seq))
+        for k in range(max_check, 0, -1):
+            if text.endswith(seq[:k]):
+                if k > max_prefix_len:
+                    max_prefix_len = k
+                break
+    return max_prefix_len
 
 
 # ─── Streaming variant ────────────────────────────────────────────────────────
@@ -368,10 +397,11 @@ def generate_stream(
     Generator that yields one decoded token string at a time.
 
     FIX: Uses incremental decoding instead of single-token decoding.
-    SentencePiece strips the leading space (▁) when decoding a single
+    SentencePiece strips the leading space ( ) when decoding a single
     token in isolation, causing "HelloWorld" instead of "Hello World".
     By decoding all generated tokens and yielding the diff, spaces
-    are preserved correctly.
+    are preserved correctly. Buffers potential prefixes of stop_sequences
+    to prevent leaking partial markers into the stream.
 
     Usage:
         for token_text in generate_stream(model, tok, "Hello"):
@@ -403,6 +433,7 @@ def generate_stream(
     # For incremental decode: track all NEW token ids and previous decoded text
     new_ids = []
     prev_text = ""
+    stopped_by_seq = False
 
     for _ in range(max_new_tokens):
         logits, _, kv_caches = model(input_tensor, kv_caches=kv_caches, offset=cur_pos)
@@ -421,26 +452,38 @@ def generate_stream(
         if next_id in stop_tokens:
             break
 
-        if stop_sequences:
-            full_text_check = tokenizer.decode(new_ids + [next_id], skip_special=True)
-            if any(seq in full_text_check for seq in stop_sequences):
-                break
-
-        # Incremental decode: decode ALL new tokens, yield only the new part
-        # This preserves SentencePiece's ▁ → space conversion correctly
         new_ids.append(next_id)
         full_text = tokenizer.decode(new_ids, skip_special=True)
-        # If text ends with replacement character, wait for subsequent byte token to resolve UTF-8 character
+
         if not full_text.endswith("\ufffd"):
-            diff = full_text[len(prev_text):]
-            prev_text = full_text
-            if diff:
-                yield diff
+            # Check for complete stop sequence match
+            if stop_sequences and any(seq in full_text for seq in stop_sequences):
+                earliest_idx = min(full_text.find(seq) for seq in stop_sequences if seq in full_text)
+                commit_text = full_text[:earliest_idx]
+                if len(commit_text) > len(prev_text):
+                    diff = commit_text[len(prev_text):]
+                    prev_text = commit_text
+                    if diff:
+                        yield diff
+                stopped_by_seq = True
+                break
+
+            # Buffer partial prefixes of any stop sequences
+            prefix_len = _find_stop_prefix_len(full_text, stop_sequences) if stop_sequences else 0
+            safe_len = len(full_text) - prefix_len
+            if safe_len > len(prev_text):
+                diff = full_text[len(prev_text):safe_len]
+                prev_text = full_text[:safe_len]
+                if diff:
+                    yield diff
 
         input_tensor = next_token
 
-    if new_ids:
+    if new_ids and not stopped_by_seq:
         final_full = tokenizer.decode(new_ids, skip_special=True)
+        if stop_sequences and any(seq in final_full for seq in stop_sequences):
+            earliest_idx = min(final_full.find(seq) for seq in stop_sequences if seq in final_full)
+            final_full = final_full[:earliest_idx]
         final_diff = final_full[len(prev_text):]
         if final_diff and "\ufffd" not in final_diff:
             yield final_diff

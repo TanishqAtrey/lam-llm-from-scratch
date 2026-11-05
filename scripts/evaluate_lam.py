@@ -32,6 +32,8 @@ def main():
                         help="Path to test JSONL file")
     parser.add_argument("--output", default="results/lam_eval.json",
                         help="Where to save evaluation report")
+    parser.add_argument("--langgraph", action="store_true",
+                        help="Use LangGraph-backed agent for evaluation")
     args = parser.parse_args()
 
     print("Loading model...")
@@ -39,7 +41,7 @@ def main():
     tokenizer = KanhaTokenizer()
 
     print(f"Loading test data from {args.test_data}...")
-    evaluator = LAMEvaluator(model, tokenizer, args.test_data)
+    evaluator = LAMEvaluator(model, tokenizer, args.test_data, use_langgraph=args.langgraph)
 
     print("Running evaluation...")
     report = evaluator.evaluate()

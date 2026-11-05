@@ -49,6 +49,7 @@ def main():
         print(f"  {tier}: {count:,}")
 
     if args.split:
+        out_dir = os.path.dirname(os.path.abspath(args.output))
         base = os.path.splitext(args.output)[0]
         train_path = f"{base}_train.jsonl"
         val_path = f"{base}_val.jsonl"
@@ -61,6 +62,16 @@ def main():
             test_ratio=args.test_ratio,
             seed=args.seed,
         )
+        # Also maintain train.jsonl / val.jsonl / test.jsonl canonical paths for consistency with main.py
+        for src, canonical_name in [(train_path, "train.jsonl"), (val_path, "val.jsonl"), (test_path, "test.jsonl")]:
+            dest = os.path.join(out_dir, canonical_name)
+            if dest != src and not os.path.exists(dest):
+                try:
+                    import shutil
+                    shutil.copyfile(src, dest)
+                except Exception:
+                    pass
+
         for label, path in [("Train", train_path), ("Val", val_path), ("Test", test_path)]:
             with open(path) as f:
                 n = sum(1 for line in f if line.strip())

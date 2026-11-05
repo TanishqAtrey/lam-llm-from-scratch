@@ -199,7 +199,7 @@ class TaskAgent:
         )
         min_conf = min(per_token_confs) if per_token_confs else 1.0
         # If any crucial token has near-zero probability, reflect that in effective confidence
-        effective_conf = min(confidence, min_conf * 2.0)
+        effective_conf = min(confidence, max(min_conf * 4.0, min_conf ** 0.5))
         return self._clean_action(raw), effective_conf
     
     def _detect_loop(self, history: list[dict]) -> bool:

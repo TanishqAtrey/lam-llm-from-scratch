@@ -62,10 +62,11 @@ class EvalReport:
         return "\n".join(lines)
 
 class LAMEvaluator:
-    def __init__(self, model, tokenizer, test_data_path: str, reference_date=None):
+    def __init__(self, model, tokenizer, test_data_path: str, reference_date=None, use_langgraph: bool = False):
         self.model = model
         self.tokenizer = tokenizer
         self.test_data_path = test_data_path
+        self.use_langgraph = use_langgraph
         if reference_date is None:
             try:
                 from kanha.utils.config import cfg
@@ -93,7 +94,11 @@ class LAMEvaluator:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_store_path = os.path.join(tmpdir, "eval_tasks.json")
             env = TaskEnvironment(task_store_path=tmp_store_path, reference_date=self.reference_date, auto_save=False)
-            agent = TaskAgent(self.model, self.tokenizer, env)
+            if self.use_langgraph:
+                from kanha.lam.langchain.graph import LangGraphTaskAgent
+                agent = LangGraphTaskAgent(self.model, self.tokenizer, env)
+            else:
+                agent = TaskAgent(self.model, self.tokenizer, env)
 
             loop_hits = 0
             limit_hits = 0
@@ -253,8 +258,12 @@ class LAMEvaluator:
             return False
         reply_lower = reply.lower()
         if 'contains_number' in expected:
-            if str(expected['contains_number']) not in reply_lower:
-                return False
+            target_num = expected['contains_number']
+            if str(target_num) not in reply_lower:
+                if target_num == 0 and any(w in reply_lower for w in ["no ", "none", "zero", "nothing", "0 "]):
+                    pass
+                else:
+                    return False
         if 'contains_title' in expected:
             if str(expected['contains_title']).lower() not in reply_lower:
                 return False

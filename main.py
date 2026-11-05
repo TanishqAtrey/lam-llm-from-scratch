@@ -153,6 +153,8 @@ def main():
     lameval_p.add_argument("--test_data", "--data", dest="test_data", required=True)
     lameval_p.add_argument("--output",    default="results/lam_eval.json")
     lameval_p.add_argument("--reference_date", default="2025-01-15")
+    lameval_p.add_argument("--langgraph", action="store_true",
+                           help="Use LangGraph-backed agent for evaluation")
 
     # ── mine-dpo ──────────────────────────────────────────────────────────
     mine_p = sub.add_parser("mine-dpo", help="Auto-mine DPO pairs from agent trajectories")
@@ -312,7 +314,11 @@ def _lam_eval(args):
     model = KanhaModel.from_pretrained(args.model)
     tokenizer = KanhaTokenizer()
 
-    evaluator = LAMEvaluator(model, tokenizer, args.test_data, reference_date=getattr(args, "reference_date", "2025-01-15"))
+    evaluator = LAMEvaluator(
+        model, tokenizer, args.test_data,
+        reference_date=getattr(args, "reference_date", "2025-01-15"),
+        use_langgraph=getattr(args, "langgraph", False),
+    )
     report = evaluator.evaluate()
 
     print(report.summary())

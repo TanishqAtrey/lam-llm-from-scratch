@@ -71,10 +71,10 @@ class LAMSFTDataset(Dataset):
                 response = step.get("action", "")
                 if response:
                     # Filter out oversized examples to prevent mid-action truncation
-                    full_text = prompt + response
-                    f_ids = self.tokenizer.encode(full_text, add_bos=True, add_eos=True)
                     p_ids = self.tokenizer.encode(prompt, add_bos=True, add_eos=False)
-                    if len(f_ids) <= self.max_len and len(f_ids) > len(p_ids):
+                    r_ids = self.tokenizer.encode(response, add_bos=False, add_eos=True)
+                    tot_len = len(p_ids) + len(r_ids)
+                    if tot_len <= self.max_len and len(r_ids) > 0:
                         self.examples.append((prompt, response))
 
         src_desc = f"{len(trajectories)} trajectories" if isinstance(data, list) else data
@@ -193,10 +193,12 @@ def lam_sft_train(args):
             target_modules=getattr(cfg.lora, "target_modules", ["q_proj", "v_proj"]),
         )
         model.print_trainable_params()
-        if getattr(args, "lr", 3e-5) <= 3e-5:
+        import sys
+        lr_explicit = any(arg == "--lr" or arg.startswith("--lr=") for arg in sys.argv)
+        if not lr_explicit and getattr(args, "lr", 3e-5) <= 3e-5:
             default_lora_lr = 1e-4
             log.info(
-                f"LoRA enabled: adjusting LAM SFT learning rate from {args.lr} to {default_lora_lr} "
+                f"LoRA enabled: adjusting default LAM SFT learning rate from {args.lr} to {default_lora_lr} "
                 f"(LoRA adapters require higher LR than full fine-tuning)"
             )
             args.lr = default_lora_lr
@@ -213,20 +215,28 @@ def lam_sft_train(args):
     # If args.data points to the full un-split trajectories file and a split train.jsonl exists, switch to it
     data_dir = os.path.dirname(args.data) or "."
     data_base = os.path.basename(args.data)
-    train_candidate = os.path.join(data_dir, "train.jsonl")
-    if data_base == "trajectories.jsonl" and os.path.exists(train_candidate):
-        log.warning(
-            f"Validation leakage prevention: args.data='{args.data}' contains the full un-split dataset. "
-            f"Automatically switching training data to split '{train_candidate}'."
-        )
-        args.data = train_candidate
+    if data_base in ("trajectories.jsonl", "data.jsonl"):
+        train_candidates = [
+            os.path.join(data_dir, "train.jsonl"),
+            os.path.join(data_dir, "trajectories_train.jsonl"),
+            args.data.replace(".jsonl", "_train.jsonl"),
+        ]
+        for tc in train_candidates:
+            if os.path.exists(tc):
+                log.warning(
+                    f"Validation leakage prevention: args.data='{args.data}' contains the full un-split dataset. "
+                    f"Automatically switching training data to split '{tc}'."
+                )
+                args.data = tc
+                break
 
     val_data = getattr(args, "val_data", None)
     if not val_data:
         candidates = [
             os.path.join(data_dir, "val.jsonl"),
-            args.data.replace("_train.jsonl", "_val.jsonl"),
             os.path.join(data_dir, "trajectories_val.jsonl"),
+            args.data.replace("_train.jsonl", "_val.jsonl"),
+            args.data.replace("train.jsonl", "val.jsonl"),
         ]
         for c in candidates:
             if os.path.exists(c) and c != args.data:
@@ -270,7 +280,7 @@ def lam_sft_train(args):
 
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size,
-        shuffle=True, drop_last=True, num_workers=0,
+        shuffle=True, drop_last=False, num_workers=0,
         collate_fn=lam_collate_fn,
     )
     val_loader = DataLoader(
@@ -343,6 +353,19 @@ def lam_sft_train(args):
             input_ids = batch["input_ids"].to(device)
             labels = batch["labels"].to(device)
             if not (labels != -100).any():
+                is_last_batch = (batch_idx + 1 == len(train_loader))
+                if is_last_batch and accum_count > 0:
+                    rem = accum_count % grad_accum_steps
+                    if rem != 0:
+                        scale_factor = grad_accum_steps / rem
+                        for p in model.parameters():
+                            if p.grad is not None:
+                                p.grad.data.mul_(scale_factor)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.training.grad_clip)
+                    optimizer.step()
+                    scheduler.step()
+                    optimizer.zero_grad()
+                    accum_count = 0
                 continue
 
             # Forward

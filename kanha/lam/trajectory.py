@@ -39,9 +39,20 @@ class LAMDPODataset(Dataset):
                 if not line.strip(): continue
                 ex = json.loads(line)
                 if 'chosen' in ex and 'rejected' in ex:
-                    self.examples.append(ex)
+                    # Validate that both chosen and rejected have at least one supervised response token
+                    p = ex.get('prompt') or format_step_prompt(ex.get('goal', ''), ex.get('history', []))
+                    _, c_lbls = self._process_one(p, ex['chosen'])
+                    _, r_lbls = self._process_one(p, ex['rejected'])
+                    c_valid = any(l != -100 for l in c_lbls)
+                    r_valid = any(l != -100 for l in r_lbls)
+                    if c_valid and r_valid:
+                        self.examples.append(ex)
+                    else:
+                        logger.warning(
+                            f"Skipping DPO sample exceeding max_len={max_len} with no supervised response tokens"
+                        )
                     
-        logger.info(f"Loaded {len(self.examples)} DPO examples from {data_path}")
+        logger.info(f"Loaded {len(self.examples)} valid DPO examples from {data_path}")
 
     def __len__(self):
         return len(self.examples)

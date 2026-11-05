@@ -81,6 +81,10 @@ class Retriever:
     def load_index(self, load_dir: str):
         """Loads a pre-built index from disk."""
         self.store.load(load_dir)
+        if self.store.dim != self.embedder.dim:
+            log.warning(
+                f"RAG dimension mismatch: store has {self.store.dim} but embedder has {self.embedder.dim}"
+            )
 
     def retrieve(self, query: str, top_k: int = 5) -> List[Dict]:
         """

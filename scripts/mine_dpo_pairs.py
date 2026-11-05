@@ -86,11 +86,38 @@ def _is_true_success(case: dict, result, env: TaskEnvironment, reference_date: s
     expected_reply = case.get('expected_reply')
     if expected_reply:
         reply = (result.final_message or "").lower()
-        if 'contains_number' in expected_reply and str(expected_reply['contains_number']) not in reply:
-            return False
+        if 'contains_number' in expected_reply:
+            target_num = expected_reply['contains_number']
+            if str(target_num) not in reply:
+                if target_num == 0 and any(w in reply for w in ["no ", "none", "zero", "nothing", "0 "]):
+                    pass
+                else:
+                    return False
         if 'contains_title' in expected_reply and str(expected_reply['contains_title']).lower() not in reply:
             return False
-        if 'contains_phrase' in expected_reply and str(expected_reply['contains_phrase']).lower() not in reply:
+        if 'contains_phrase' in expected_reply:
+            phrase = str(expected_reply['contains_phrase']).lower()
+            if phrase == "which":
+                if not any(w in reply for w in ["which", "clarify", "multiple", "specify", "what"]):
+                    return False
+            elif phrase not in reply:
+                return False
+
+    tier = case.get('tier', 'unknown')
+    if tier in ("tier7", 7):
+        last_act = result.steps[-1]["action"] if result.steps else ""
+        if not last_act.startswith("ask("):
+            return False
+    elif tier in ("tier8", 8):
+        reply = (result.final_message or "").lower()
+        if not any(k in reply for k in ["sorry", "only manage", "cannot", "can't", "only handle"]):
+            return False
+    elif tier in ("tier2", "tier5", 2, 5):
+        query_actions = [
+            s.get("action", "") for s in result.steps
+            if any(s.get("action", "").startswith(q) for q in ("count(", "list(", "find("))
+        ]
+        if not query_actions or not (result.final_message or "").strip():
             return False
 
     return True
@@ -173,12 +200,14 @@ def _find_divergence_pair(
         r_step = rejected_steps[i]
         c_act = c_step.get("action", "").strip()
         r_act = r_step.get("action", "").strip()
+        r_conf = rejected_confs[i] if i < len(rejected_confs) else 0.0
 
         # If rejected step has empty action, check if retry_history captured it
         if not r_act and retry_history:
             for r in retry_history:
                 if (r.get("step_num") == i + 1 or len(retry_history) == 1) and r.get("action"):
                     r_act = r.get("action", "").strip()
+                    r_conf = r.get("confidence", 0.0)
                     break
 
         # Fallback: if rejected generated empty action / immediate abort
@@ -197,11 +226,16 @@ def _find_divergence_pair(
 
             prompt = format_step_prompt(goal, chosen_steps[:i])
             c_conf = chosen_confs[i] if i < len(chosen_confs) else 1.0
-            r_conf = rejected_confs[i] if i < len(rejected_confs) else 0.0
             return prompt, c_act, r_act, c_conf, r_conf
 
     # Check if rejected failed at the next step after min_len matching steps
     if len(chosen_steps) > min_len:
+        prefix_match = all(
+            chosen_steps[k].get("action", "").strip() == rejected_steps[k].get("action", "").strip()
+            for k in range(min_len)
+        )
+        if not prefix_match:
+            return None
         i = min_len
         c_act = chosen_steps[i].get("action", "").strip()
         r_act = ""
@@ -251,8 +285,23 @@ def mine_dpo_pairs(args):
     tokenizer = KanhaTokenizer()
 
     # ── Load eval data ──
+    eval_path = args.eval_data
+    if not os.path.exists(eval_path):
+        candidates = [
+            "data/lam/train.jsonl",
+            "data/lam/trajectories_train.jsonl",
+            "data/lam/trajectories.jsonl",
+            "data/lam/test.jsonl",
+            "data/lam/trajectories_test.jsonl",
+        ]
+        for c in candidates:
+            if os.path.exists(c):
+                log.info(f"eval_data '{eval_path}' not found, falling back to existing '{c}'")
+                eval_path = c
+                break
+
     eval_cases = []
-    with open(args.eval_data, "r", encoding="utf-8") as f:
+    with open(eval_path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:

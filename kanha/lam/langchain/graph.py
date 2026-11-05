@@ -76,6 +76,7 @@ class AgentState(TypedDict):
     confidence_scores: list[float]
     low_confidence_count: int
     retry_history: list[dict]
+    temperature: Optional[float]
 
 
 # ── Result dataclass (matches TaskAgent's AgentResult) ────────────────────────
@@ -107,9 +108,14 @@ def _make_generate_node(llm: KanhaLLM):
     def generate_node(state: AgentState) -> dict:
         prompt = format_step_prompt(state["goal"], state["history"])
 
-        temp = 0.0 if state["retry_count"] == 0 else 0.3
-        k = llm.top_k if state["retry_count"] == 0 else max(llm.top_k, 50)
-        raw, confidence = llm.generate_action_with_confidence(prompt, temperature=temp, top_k=k)
+        temp = state.get("temperature")
+        if state["retry_count"] == 0:
+            gen_temp = temp if temp is not None else 0.0
+            k = llm.top_k
+        else:
+            gen_temp = max(temp if temp is not None else 0.0, 0.3)
+            k = max(llm.top_k, 50)
+        raw, confidence = llm.generate_action_with_confidence(prompt, temperature=gen_temp, top_k=k)
 
         return {"raw_action": raw, "confidence": confidence}
 
@@ -278,11 +284,22 @@ def _after_execute(state: AgentState) -> str:
     if state["step_count"] >= state["max_steps"]:
         return "abort_limit"
 
-    # Loop detection: last 3 actions identical
-    history = state["history"]
-    if len(history) >= 3:
-        last_3 = [h.get("action") for h in history[-3:]]
-        if last_3[0] == last_3[1] == last_3[2]:
+    # Loop detection parity with TaskAgent:
+    # 1. 3 identical consecutive actions (A -> A -> A)
+    # 2. 2-step alternating cycle repeated twice (A -> B -> A -> B)
+    # 3. 3-step repeating cycle repeated twice (A -> B -> C -> A -> B -> C)
+    history = state.get("history", [])
+    actions = [h.get("action", "").strip() for h in history if isinstance(h, dict) and "action" in h]
+
+    if len(actions) >= 3 and actions[-1] and actions[-1] == actions[-2] == actions[-3]:
+        return "abort_loop"
+
+    if len(actions) >= 4 and actions[-1] and actions[-2]:
+        if actions[-4] == actions[-2] and actions[-3] == actions[-1]:
+            return "abort_loop"
+
+    if len(actions) >= 6 and all(actions[-i] for i in range(1, 4)):
+        if actions[-6:-3] == actions[-3:]:
             return "abort_loop"
 
     return "continue"
@@ -418,11 +435,12 @@ class LangGraphTaskAgent:
         self.graph = build_agent_graph(self.llm, self.env)
 
 
-    def run(self, goal: str) -> LangGraphAgentResult:
+    def run(self, goal: str, temperature: Optional[float] = None) -> LangGraphAgentResult:
         """Execute a user goal through the LangGraph agent loop.
 
         Args:
             goal: Natural language user request.
+            temperature: Optional generation temperature override.
 
         Returns:
             A ``LangGraphAgentResult`` with the same interface as
@@ -452,6 +470,7 @@ class LangGraphTaskAgent:
             "confidence_scores": [],
             "low_confidence_count": 0,
             "retry_history": [],
+            "temperature": temperature,
         }
 
         # Run the graph

@@ -120,18 +120,20 @@ class InferenceEngine:
         log.info("InferenceEngine ready")
         return engine
 
-    def chat_stream(self, user_message: str):
+    def chat_stream(self, user_message: str, memory: Optional[ShortTermMemory] = None):
         """
         Streaming generator that yields response tokens and tool outputs as they arrive.
         Updates conversation memory upon completion.
         """
+        mem = memory if memory is not None else self.memory
+
         # 0. Safety filter on user prompt before generation begins
         try:
             from kanha.alignment.filters import is_safe_prompt
             safe, refusal_msg = is_safe_prompt(user_message)
             if not safe:
-                self.memory.add("user", user_message)
-                self.memory.add("assistant", refusal_msg)
+                mem.add("user", user_message)
+                mem.add("assistant", refusal_msg)
                 yield refusal_msg
                 return
         except ImportError:
@@ -151,7 +153,7 @@ class InferenceEngine:
         if self.use_tools and self.tool_router:
             tool_desc = self.tool_router.format_tool_descriptions()
 
-        memory_ctx = self.memory.format() if len(self.memory) > 0 else ""
+        memory_ctx = mem.format() if len(mem) > 0 else ""
         prompt = self.prompt_builder.build(
             instruction=user_message,
             memory_context=memory_ctx,
@@ -177,7 +179,7 @@ class InferenceEngine:
                     top_k=cfg.inference.top_k,
                     top_p=cfg.inference.top_p,
                     repetition_penalty=cfg.inference.repetition_penalty,
-                    stop_sequences=["[Tool Result:", "\nObservation:"],
+                    stop_sequences=["[Tool Result:", "\nObservation:", "\n### Instruction:", "### Instruction:", "### Conversation History:"],
                     device=self.device,
                 ):
                     step_parts.append(token_text)
@@ -207,6 +209,7 @@ class InferenceEngine:
                 top_k=cfg.inference.top_k,
                 top_p=cfg.inference.top_p,
                 repetition_penalty=cfg.inference.repetition_penalty,
+                stop_sequences=["\n### Instruction:", "### Instruction:", "### Conversation History:"],
                 device=self.device,
             ):
                 response_parts.append(token_text)
@@ -222,10 +225,10 @@ class InferenceEngine:
             pass
 
         # 5. Update memory
-        self.memory.add("user", user_message)
-        self.memory.add("assistant", final_response)
+        mem.add("user", user_message)
+        mem.add("assistant", final_response)
 
-    def chat(self, user_message: str, stream: bool = False) -> str:
+    def chat(self, user_message: str, stream: bool = False, memory: Optional[ShortTermMemory] = None) -> str:
         """
         Main chat method — takes a user message and returns the model's response.
 
@@ -240,17 +243,20 @@ class InferenceEngine:
         Args:
             user_message : the user's raw text input
             stream       : if True, prints tokens as they're generated
+            memory       : optional explicit ShortTermMemory to use instead of self.memory
 
         Returns:
             The model's response string
         """
+        mem = memory if memory is not None else self.memory
+
         # 0. Safety filter on user prompt before generation begins
         try:
             from kanha.alignment.filters import is_safe_prompt
             safe, refusal_msg = is_safe_prompt(user_message)
             if not safe:
-                self.memory.add("user", user_message)
-                self.memory.add("assistant", refusal_msg)
+                mem.add("user", user_message)
+                mem.add("assistant", refusal_msg)
                 if stream:
                     print(refusal_msg)
                 return refusal_msg
@@ -259,7 +265,7 @@ class InferenceEngine:
 
         if stream:
             response_parts = []
-            for chunk in self.chat_stream(user_message):
+            for chunk in self.chat_stream(user_message, memory=mem):
                 print(chunk, end="", flush=True)
                 response_parts.append(chunk)
             print()  # newline after streaming
@@ -279,7 +285,7 @@ class InferenceEngine:
         if self.use_tools and self.tool_router:
             tool_desc = self.tool_router.format_tool_descriptions()
 
-        memory_ctx = self.memory.format() if len(self.memory) > 0 else ""
+        memory_ctx = mem.format() if len(mem) > 0 else ""
         prompt = self.prompt_builder.build(
             instruction=user_message,
             memory_context=memory_ctx,
@@ -304,7 +310,7 @@ class InferenceEngine:
                     top_k=cfg.inference.top_k,
                     top_p=cfg.inference.top_p,
                     repetition_penalty=cfg.inference.repetition_penalty,
-                    stop_sequences=["[Tool Result:", "\nObservation:"],
+                    stop_sequences=["[Tool Result:", "\nObservation:", "\n### Instruction:", "### Instruction:", "### Conversation History:"],
                     device=self.device,
                 )
                 tool_calls = find_tool_calls(gen_text)
@@ -330,6 +336,7 @@ class InferenceEngine:
                 top_k=cfg.inference.top_k,
                 top_p=cfg.inference.top_p,
                 repetition_penalty=cfg.inference.repetition_penalty,
+                stop_sequences=["\n### Instruction:", "### Instruction:", "### Conversation History:"],
                 device=self.device,
             )
 
@@ -341,8 +348,8 @@ class InferenceEngine:
             pass
 
         # 6. Update memory
-        self.memory.add("user", user_message)
-        self.memory.add("assistant", response)
+        mem.add("user", user_message)
+        mem.add("assistant", response)
 
         return response
 

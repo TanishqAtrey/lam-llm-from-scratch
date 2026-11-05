@@ -167,23 +167,25 @@ class DPODataset(Dataset):
 
     def _tokenize_pair(self, prompt: str, response: str):
         """Tokenizes a (prompt, response) pair with boundary-safe instruction masking and dialogue support."""
-        clean_prompt = prompt
-        if clean_prompt.startswith("### Instruction:\n"):
-            clean_prompt = clean_prompt[len("### Instruction:\n"):].strip()
-        if "### Response:\n" in clean_prompt:
-            clean_prompt = clean_prompt[:clean_prompt.rfind("### Response:\n")].strip()
-
-        # Format with canonical template (handles multi-turn conversation history automatically)
-        full_text = self.prompt_builder.build_training_pair(clean_prompt, response)
-
-        # Compute instruction prefix and response text for boundary-safe tokenization
-        if "### Response:\n" in full_text:
-            split_idx = full_text.rfind("### Response:\n") + len("### Response:\n")
-            instruction_prefix = full_text[:split_idx]
-            resp_text = full_text[split_idx:]
-        else:
-            instruction_prefix = f"### Instruction:\n{clean_prompt}\n\n### Response:\n"
+        # Check if prompt already contains canonical response boundary
+        if "### Response:\n" in prompt:
+            split_idx = prompt.rfind("### Response:\n") + len("### Response:\n")
+            instruction_prefix = prompt[:split_idx]
             resp_text = response
+        elif prompt.strip().startswith("### "):
+            # Prompt is already structured with sections (e.g. ### Conversation History or ### Instruction)
+            instruction_prefix = prompt.strip() + "\n\n### Response:\n"
+            resp_text = response
+        else:
+            # Unstructured prompt or raw dialogue: use canonical builder
+            full_text = self.prompt_builder.build_training_pair(prompt.strip(), response)
+            if "### Response:\n" in full_text:
+                split_idx = full_text.rfind("### Response:\n") + len("### Response:\n")
+                instruction_prefix = full_text[:split_idx]
+                resp_text = full_text[split_idx:]
+            else:
+                instruction_prefix = f"### Instruction:\n{prompt.strip()}\n\n### Response:\n"
+                resp_text = response
 
         # Tokenize prompt and response separately to guarantee exact boundary alignment
         instruction_ids = self.tokenizer.encode(
@@ -282,10 +284,12 @@ def dpo_train(args):
             target_modules=getattr(cfg.lora, "target_modules", ["q_proj", "v_proj"]),
         )
         policy.print_trainable_params()
-        if getattr(args, "lr", 5e-6) <= 5e-6:
+        import sys
+        lr_explicit = any(arg == "--lr" or arg.startswith("--lr=") for arg in sys.argv)
+        if not lr_explicit and getattr(args, "lr", 5e-6) <= 5e-6:
             default_lora_lr = 5e-5
             log.info(
-                f"LoRA enabled: adjusting DPO learning rate from {args.lr} to {default_lora_lr} "
+                f"LoRA enabled: adjusting default DPO learning rate from {args.lr} to {default_lora_lr} "
                 f"(LoRA adapters require higher LR than full fine-tuning)"
             )
             args.lr = default_lora_lr
@@ -345,7 +349,7 @@ def dpo_train(args):
         train_dataset, val_dataset = dataset, None
 
     train_loader = DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True, num_workers=0,
+        train_dataset, batch_size=args.batch_size, shuffle=True, drop_last=False, num_workers=0,
         collate_fn=dpo_collate_fn,
     )
     val_loader = DataLoader(
@@ -377,7 +381,14 @@ def dpo_train(args):
     # DPO hyperparameters
     beta = getattr(args, "beta", getattr(dpo_cfg, 'beta', 0.1) if dpo_cfg else 0.1)
     length_norm = getattr(args, "length_norm", False) or (getattr(dpo_cfg, "length_norm", False) if dpo_cfg else False)
-    effective_beta = beta
+    if length_norm and beta <= 0.2:
+        effective_beta = beta * 20.0
+        log.info(
+            f"Length normalization enabled: scaling effective beta from {beta} to {effective_beta} "
+            f"(token-level log-prob differences require ~10-20x higher beta than sequence-level)"
+        )
+    else:
+        effective_beta = beta
 
     grad_accum_steps = getattr(args, "grad_accum_steps", None) or (
         getattr(dpo_cfg, "grad_accum_steps", 4) if dpo_cfg else 4
@@ -400,6 +411,7 @@ def dpo_train(args):
     best_val_score = float("-inf")
     best_val_acc = -1.0
     best_val_margin = float("-inf")
+    new_best_saved = False
 
     log.info(f"DPO Training | epochs={args.epochs} | lr={args.lr} | beta={beta} | "
              f"grad_accum={grad_accum_steps} | length_norm={length_norm} | train={train_size} | val={val_size}")
@@ -528,23 +540,28 @@ def dpo_train(args):
                     val_margins.append((c_rew - r_rew).mean().item())
                     val_accs.append((c_rew > r_rew).float().mean().item())
 
-            avg_val_acc = sum(val_accs) / max(len(val_accs), 1)
-            avg_val_margin = sum(val_margins) / max(len(val_margins), 1)
-            composite_score = avg_val_acc * 100.0 + avg_val_margin
-            log.info(
-                f"DPO Epoch {epoch+1} Val | Reward Acc: {avg_val_acc:.1%} | "
-                f"Margin: {avg_val_margin:.3f} | Score: {composite_score:.3f}"
-            )
-
-            if composite_score > best_val_score or (avg_val_acc > best_val_acc):
-                best_val_score = composite_score
-                best_val_acc = avg_val_acc
-                best_val_margin = avg_val_margin
-                best_ckpt = os.path.join(args.output, "dpo_best.pt")
-                policy.save_pretrained(best_ckpt)
+            if len(val_accs) > 0:
+                avg_val_acc = sum(val_accs) / len(val_accs)
+                avg_val_margin = sum(val_margins) / len(val_margins)
                 log.info(
-                    f"New best DPO model saved to {best_ckpt} (Val Acc: {best_val_acc:.1%}, "
-                    f"Margin: {best_val_margin:.3f}, Score: {best_val_score:.3f})"
+                    f"DPO Epoch {epoch+1} Val | Reward Acc: {avg_val_acc:.1%} | "
+                    f"Margin: {avg_val_margin:.3f}"
+                )
+
+                is_better = (avg_val_acc > best_val_acc) or (abs(avg_val_acc - best_val_acc) < 1e-4 and avg_val_margin > best_val_margin)
+                if is_better:
+                    best_val_acc = avg_val_acc
+                    best_val_margin = avg_val_margin
+                    best_ckpt = os.path.join(args.output, "dpo_best.pt")
+                    policy.save_pretrained(best_ckpt)
+                    new_best_saved = True
+                    log.info(
+                        f"New best DPO model saved to {best_ckpt} (Val Acc: {best_val_acc:.1%}, "
+                        f"Margin: {best_val_margin:.3f})"
+                    )
+            else:
+                log.warning(
+                    f"DPO Epoch {epoch+1} Val | No valid validation batches evaluated; skipping best model checkpoint update"
                 )
 
             policy.train()
@@ -554,9 +571,15 @@ def dpo_train(args):
         policy.save_pretrained(epoch_ckpt)
 
     # Save final
-    save_path = os.path.join(args.output, "dpo_final.pt")
-    policy.save_pretrained(save_path)
-    log.info(f"DPO model saved to {save_path}")
+    best_ckpt = os.path.join(args.output, "dpo_best.pt")
+    final_ckpt = os.path.join(args.output, "dpo_final.pt")
+    if new_best_saved and os.path.exists(best_ckpt):
+        import shutil
+        shutil.copyfile(best_ckpt, final_ckpt)
+        log.info(f"Copied best model ({best_ckpt}) to {final_ckpt}")
+    else:
+        policy.save_pretrained(final_ckpt)
+        log.info(f"DPO model saved to {final_ckpt}")
 
 
 if __name__ == "__main__":

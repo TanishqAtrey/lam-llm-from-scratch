@@ -69,14 +69,20 @@ def _resolve_model_path(model_path: Optional[str] = None) -> str:
     try:
         from kanha.utils.config import cfg
         default_dir = getattr(cfg.paths, "finetuned_model", "models/finetuned/")
-        candidate = os.path.join(default_dir, "sft_final.pt") if default_dir.endswith("/") else default_dir
-        if os.path.exists(candidate):
-            return candidate
+        for cand_name in ["dpo_final.pt", "dpo_best.pt", "sft_final.pt", "sft_best.pt"]:
+            candidate = os.path.join(default_dir, cand_name) if default_dir.endswith("/") else default_dir
+            if os.path.exists(candidate):
+                return candidate
     except Exception:
         pass
     for fallback in [
+        "models/finetuned/dpo_final.pt",
+        "models/finetuned/dpo_best.pt",
         "models/finetuned/sft_final.pt",
+        "models/finetuned/sft_best.pt",
         "models/base/final_model.pt",
+        "models/lam/dpo_final.pt",
+        "models/lam/dpo_best.pt",
         "models/lam/lam_final.pt",
     ]:
         if os.path.exists(fallback):
@@ -121,7 +127,12 @@ def create_app(
         if _lam_model is None:
             lam_path = lam_model_path or os.getenv("KANHA_LAM_MODEL")
             if not lam_path:
-                for candidate in ["models/lam/dpo_final.pt", "models/lam/lam_final.pt", "models/lam/lam_sft.pt"]:
+                for candidate in [
+                    "models/lam/dpo_final.pt",
+                    "models/lam/dpo_best.pt",
+                    "models/lam/lam_final.pt",
+                    "models/lam/lam_sft.pt",
+                ]:
                     if os.path.exists(candidate):
                         lam_path = candidate
                         break
@@ -154,24 +165,26 @@ def create_app(
         try:
             engine = get_engine()
             # Session-isolated memory handling
+            from kanha.memory.short_term import ShortTermMemory
+            from kanha.utils.config import cfg
             if req.session_id:
-                from kanha.memory.short_term import ShortTermMemory
-                from kanha.utils.config import cfg
-                if req.session_id not in _sessions:
-                    _sessions[req.session_id] = ShortTermMemory(max_turns=cfg.memory.short_term_limit)
-                orig_mem = engine.memory
-                engine.memory = _sessions[req.session_id]
-                try:
-                    if req.stream:
-                        return StreamingResponse(engine.chat_stream(text), media_type="text/plain")
-                    response = engine.chat(text, stream=False)
-                    return ChatResponse(response=response)
-                finally:
-                    engine.memory = orig_mem
+                if req.session_id in _sessions:
+                    sess_mem = _sessions.pop(req.session_id)
+                    _sessions[req.session_id] = sess_mem
+                else:
+                    if len(_sessions) >= 1000:
+                        oldest_key = next(iter(_sessions))
+                        del _sessions[oldest_key]
+                    sess_mem = ShortTermMemory(max_turns=cfg.memory.short_term_limit)
+                    _sessions[req.session_id] = sess_mem
+            else:
+                # Stateless request: use ephemeral isolated memory so un-sessioned requests
+                # do not leak or share conversation context with other users or engine.memory
+                sess_mem = ShortTermMemory(max_turns=0)
 
             if req.stream:
-                return StreamingResponse(engine.chat_stream(text), media_type="text/plain")
-            response = engine.chat(text, stream=False)
+                return StreamingResponse(engine.chat_stream(text, memory=sess_mem), media_type="text/plain")
+            response = engine.chat(text, stream=False, memory=sess_mem)
             return ChatResponse(response=response)
         except HTTPException:
             raise

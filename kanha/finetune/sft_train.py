@@ -72,10 +72,17 @@ class SFTDataset(Dataset):
                     inst = obj["instruction"]
                     resp = obj["response"]
                     full = self.prompt_builder.build_training_pair(inst, resp)
-                    f_ids = self.tokenizer.encode(full, add_bos=True, add_eos=True)
-                    p_prefix = full[:full.rfind("### Response:\n") + len("### Response:\n")] if "### Response:\n" in full else f"### Instruction:\n{inst}\n\n### Response:\n"
+                    if "### Response:\n" in full:
+                        split_idx = full.rfind("### Response:\n") + len("### Response:\n")
+                        p_prefix = full[:split_idx]
+                        r_text = full[split_idx:]
+                    else:
+                        p_prefix = f"### Instruction:\n{inst}\n\n### Response:\n"
+                        r_text = resp
                     p_ids = self.tokenizer.encode(p_prefix, add_bos=True, add_eos=False)
-                    if len(f_ids) <= self.max_len and len(f_ids) > len(p_ids):
+                    r_ids = self.tokenizer.encode(r_text, add_bos=False, add_eos=True)
+                    tot_len = len(p_ids) + len(r_ids)
+                    if tot_len <= self.max_len and len(r_ids) > 0:
                         self.samples.append(obj)
 
         log.info(f"Loaded {len(self.samples):,} valid SFT samples from {data_path}")
@@ -211,10 +218,12 @@ def sft_train(args):
             target_modules=getattr(cfg.lora, "target_modules", ["q_proj", "v_proj"]),
         )
         model.print_trainable_params()
-        if getattr(args, "lr", 3e-5) <= 3e-5:
+        import sys
+        lr_explicit = any(arg == "--lr" or arg.startswith("--lr=") for arg in sys.argv)
+        if not lr_explicit and getattr(args, "lr", 3e-5) <= 3e-5:
             default_lora_lr = 1e-4
             log.info(
-                f"LoRA enabled: adjusting SFT learning rate from {args.lr} to {default_lora_lr} "
+                f"LoRA enabled: adjusting default SFT learning rate from {args.lr} to {default_lora_lr} "
                 f"(LoRA adapters require higher LR than full fine-tuning)"
             )
             args.lr = default_lora_lr
@@ -236,7 +245,7 @@ def sft_train(args):
 
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size,
-        shuffle=True, drop_last=True, num_workers=0,
+        shuffle=True, drop_last=False, num_workers=0,
         collate_fn=sft_collate_fn,
     )
     val_loader = DataLoader(
@@ -305,6 +314,19 @@ def sft_train(args):
             input_ids = batch["input_ids"].to(device)
             labels = batch["labels"].to(device)
             if not (labels != -100).any():
+                is_last_batch = (batch_idx + 1 == len(train_loader))
+                if is_last_batch and accum_count > 0:
+                    rem = accum_count % grad_accum_steps
+                    if rem != 0:
+                        scale_factor = grad_accum_steps / rem
+                        for p in model.parameters():
+                            if p.grad is not None:
+                                p.grad.data.mul_(scale_factor)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.training.grad_clip)
+                    optimizer.step()
+                    scheduler.step()
+                    optimizer.zero_grad()
+                    accum_count = 0
                 continue
 
             # Forward

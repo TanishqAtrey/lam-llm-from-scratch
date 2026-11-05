@@ -93,6 +93,8 @@ class KanhaLLM(BaseLLM):
         max_new_tokens = kwargs.get("max_new_tokens", self.max_new_tokens)
         top_k = kwargs.get("top_k", self.top_k)
 
+        stop_seqs = list(stop) if stop else ["\n", "\n### Observation", "### Observation"]
+
         raw = kanha_generate(
             self._model,
             self._tokenizer,
@@ -102,14 +104,8 @@ class KanhaLLM(BaseLLM):
             top_k=top_k,
             top_p=self.top_p,
             repetition_penalty=self.repetition_penalty,
+            stop_sequences=stop_seqs,
         )
-
-        # Apply stop sequences if provided
-        if stop:
-            for seq in stop:
-                idx = raw.find(seq)
-                if idx != -1:
-                    raw = raw[:idx]
 
         return raw
 
@@ -137,10 +133,10 @@ class KanhaLLM(BaseLLM):
     def generate_action_with_confidence(
         self, prompt: str, temperature: float = 0.0, top_k: int = None, top_p: float = None
     ) -> tuple[str, float]:
-        """Generate a cleaned action string and its mean token-level confidence score."""
+        """Generate a cleaned action string and its effective token-level confidence score."""
         k = top_k if top_k is not None else self.top_k
         p = top_p if top_p is not None else self.top_p
-        raw, confidence, _ = kanha_generate_with_confidence(
+        raw, confidence, per_token_confs = kanha_generate_with_confidence(
             self._model,
             self._tokenizer,
             prompt,
@@ -149,8 +145,13 @@ class KanhaLLM(BaseLLM):
             top_k=k,
             top_p=p,
             repetition_penalty=self.repetition_penalty,
+            stop_sequences=["\n", "\n### Observation", "### Observation"],
+            confidence_metric="geometric",
         )
-        return self._clean_action(raw), confidence
+        min_conf = min(per_token_confs) if per_token_confs else 1.0
+        # If any crucial token has near-zero probability, reflect that in effective confidence
+        effective_conf = min(confidence, max(min_conf * 4.0, min_conf ** 0.5))
+        return self._clean_action(raw), effective_conf
 
     @staticmethod
     def _clean_action(raw: str) -> str:

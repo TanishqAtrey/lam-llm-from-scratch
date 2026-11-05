@@ -177,15 +177,9 @@ class DPODataset(Dataset):
             instruction_prefix = prompt.strip() + "\n\n### Response:\n"
             resp_text = response
         else:
-            # Unstructured prompt or raw dialogue: use canonical builder
-            full_text = self.prompt_builder.build_training_pair(prompt.strip(), response)
-            if "### Response:\n" in full_text:
-                split_idx = full_text.rfind("### Response:\n") + len("### Response:\n")
-                instruction_prefix = full_text[:split_idx]
-                resp_text = full_text[split_idx:]
-            else:
-                instruction_prefix = f"### Instruction:\n{prompt.strip()}\n\n### Response:\n"
-                resp_text = response
+            # Unstructured prompt or raw dialogue: use canonical builder directly
+            instruction_prefix, _ = self.prompt_builder.build_prompt_prefix(prompt.strip())
+            resp_text = response
 
         # Tokenize prompt and response separately to guarantee exact boundary alignment
         instruction_ids = self.tokenizer.encode(
@@ -198,7 +192,7 @@ class DPODataset(Dataset):
         mask_len = len(instruction_ids)
 
         if len(full_ids) > self.max_len:
-            full_ids = full_ids[:self.max_len]
+            full_ids = full_ids[:self.max_len - 1] + [self.tokenizer.EOS_ID]
 
         # Shifted input/labels
         input_ids = full_ids[:-1]
@@ -284,14 +278,9 @@ def dpo_train(args):
             target_modules=getattr(cfg.lora, "target_modules", ["q_proj", "v_proj"]),
         )
         policy.print_trainable_params()
-        import sys
-        lr_explicit = any(arg == "--lr" or arg.startswith("--lr=") for arg in sys.argv)
-        if not lr_explicit and getattr(args, "lr", 5e-6) <= 5e-6:
+        if getattr(args, "lr", None) is None:
             default_lora_lr = 5e-5
-            log.info(
-                f"LoRA enabled: adjusting default DPO learning rate from {args.lr} to {default_lora_lr} "
-                f"(LoRA adapters require higher LR than full fine-tuning)"
-            )
+            log.info(f"LoRA enabled: setting default DPO learning rate to {default_lora_lr}")
             args.lr = default_lora_lr
 
     policy.train()
@@ -329,11 +318,12 @@ def dpo_train(args):
         except Exception:
             pass
 
+    model_max_len = getattr(policy, "max_seq_len", getattr(getattr(policy, "model", None), "max_seq_len", cfg.model.max_seq_len))
     if lam_mode:
         from kanha.lam.trajectory import LAMDPODataset
-        dataset = LAMDPODataset(args.data, tokenizer, max_len=cfg.model.max_seq_len)
+        dataset = LAMDPODataset(args.data, tokenizer, max_len=model_max_len)
     else:
-        dataset = DPODataset(args.data, tokenizer, max_len=cfg.model.max_seq_len)
+        dataset = DPODataset(args.data, tokenizer, max_len=model_max_len)
 
     # Train / Val split for held-out reward accuracy tracking
     val_fraction = getattr(args, "val_fraction", 0.1)
@@ -408,7 +398,6 @@ def dpo_train(args):
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
     ensure_dir(args.output)
-    best_val_score = float("-inf")
     best_val_acc = -1.0
     best_val_margin = float("-inf")
     new_best_saved = False

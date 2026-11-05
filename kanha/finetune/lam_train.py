@@ -70,10 +70,18 @@ class LAMSFTDataset(Dataset):
                 prompt = build_lam_step_prompt(goal, history)
                 response = step.get("action", "")
                 if response:
-                    # Filter out oversized examples to prevent mid-action truncation
                     p_ids = self.tokenizer.encode(prompt, add_bos=True, add_eos=False)
                     r_ids = self.tokenizer.encode(response, add_bos=False, add_eos=True)
                     tot_len = len(p_ids) + len(r_ids)
+
+                    # If step exceeds max_len, sliding-window truncate early history steps
+                    # instead of dropping the late interaction turn entirely
+                    while tot_len > self.max_len and len(history) > 1:
+                        history = history[1:]
+                        prompt = build_lam_step_prompt(goal, history)
+                        p_ids = self.tokenizer.encode(prompt, add_bos=True, add_eos=False)
+                        tot_len = len(p_ids) + len(r_ids)
+
                     if tot_len <= self.max_len and len(r_ids) > 0:
                         self.examples.append((prompt, response))
 
@@ -97,7 +105,7 @@ class LAMSFTDataset(Dataset):
         mask_len = len(prompt_ids)
 
         if len(full_ids) > self.max_len:
-            full_ids = full_ids[:self.max_len]
+            full_ids = full_ids[:self.max_len - 1] + [self.tokenizer.EOS_ID]
 
         # Shifted input / target pairs (standard causal LM)
         input_ids = full_ids[:-1]
@@ -193,15 +201,13 @@ def lam_sft_train(args):
             target_modules=getattr(cfg.lora, "target_modules", ["q_proj", "v_proj"]),
         )
         model.print_trainable_params()
-        import sys
-        lr_explicit = any(arg == "--lr" or arg.startswith("--lr=") for arg in sys.argv)
-        if not lr_explicit and getattr(args, "lr", 3e-5) <= 3e-5:
+        if getattr(args, "lr", None) is None:
             default_lora_lr = 1e-4
-            log.info(
-                f"LoRA enabled: adjusting default LAM SFT learning rate from {args.lr} to {default_lora_lr} "
-                f"(LoRA adapters require higher LR than full fine-tuning)"
-            )
+            log.info(f"LoRA enabled: setting default LAM SFT learning rate to {default_lora_lr}")
             args.lr = default_lora_lr
+
+    if getattr(args, "lr", None) is None:
+        args.lr = 3e-5
 
     model.train()
     model.to(device)
@@ -210,7 +216,7 @@ def lam_sft_train(args):
     tokenizer = KanhaTokenizer()
 
     # ── Dataset with train/val split and leakage protection ──
-    max_seq_len = getattr(cfg.model, "max_seq_len", 512)
+    max_seq_len = getattr(model, "max_seq_len", getattr(getattr(model, "model", None), "max_seq_len", cfg.model.max_seq_len))
 
     # If args.data points to the full un-split trajectories file and a split train.jsonl exists, switch to it
     data_dir = os.path.dirname(args.data) or "."
@@ -262,21 +268,29 @@ def lam_sft_train(args):
         train_dataset = LAMSFTDataset(clean_train_trajs, tokenizer, max_len=max_seq_len)
         val_dataset = LAMSFTDataset(val_trajs, tokenizer, max_len=max_seq_len)
     else:
-        # Load full trajectories and split at trajectory level to prevent step leakage
+        # Load full trajectories and split grouped by goal to prevent trajectory and goal leakage
+        from collections import defaultdict
         import random as _rnd
         with open(args.data, "r", encoding="utf-8") as f:
             all_trajs = [json.loads(line) for line in f if line.strip()]
 
-        val_count = max(1, int(len(all_trajs) * val_fraction))
-        train_count = len(all_trajs) - val_count
+        goals_map = defaultdict(list)
+        for t in all_trajs:
+            goals_map[t.get("goal", "")].append(t)
 
+        all_goals = sorted(list(goals_map.keys()))
         rng = _rnd.Random(42)
-        rng.shuffle(all_trajs)
-        train_trajs = all_trajs[:train_count]
-        val_trajs = all_trajs[train_count:]
+        rng.shuffle(all_goals)
+        val_goal_count = max(1, int(len(all_goals) * val_fraction)) if len(all_goals) > 10 else 0
+        if val_goal_count >= len(all_goals):
+            val_goal_count = 0
+        val_goals_set = set(all_goals[:val_goal_count]) if val_goal_count > 0 else set()
+
+        train_trajs = [t for goal in all_goals if goal not in val_goals_set for t in goals_map[goal]]
+        val_trajs = [t for goal in all_goals if goal in val_goals_set for t in goals_map[goal]]
 
         train_dataset = LAMSFTDataset(train_trajs, tokenizer, max_len=max_seq_len)
-        val_dataset = LAMSFTDataset(val_trajs, tokenizer, max_len=max_seq_len)
+        val_dataset = LAMSFTDataset(val_trajs, tokenizer, max_len=max_seq_len) if val_trajs else None
 
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size,
@@ -287,10 +301,10 @@ def lam_sft_train(args):
         val_dataset, batch_size=args.batch_size,
         shuffle=False, drop_last=False, num_workers=0,
         collate_fn=lam_collate_fn,
-    )
+    ) if val_dataset and len(val_dataset) > 0 else None
 
     train_size = len(train_dataset)
-    val_size = len(val_dataset)
+    val_size = len(val_dataset) if val_dataset else 0
     log.info(f"Split: {train_size:,} train / {val_size:,} val steps")
 
     # ── Optimizer (separate weight decay for LoRA / biases / norms) ──
@@ -405,7 +419,7 @@ def lam_sft_train(args):
         avg_train = epoch_loss / max(n_batches, 1)
 
         # ── Validation ──
-        val_loss = _eval_lam_val_loss(model, val_loader, device)
+        val_loss = _eval_lam_val_loss(model, val_loader, device) if val_loader else avg_train
         log.info(
             f"LAM Epoch {epoch+1} | Train Loss: {avg_train:.4f} | "
             f"Val Loss: {val_loss:.4f} | Best Val: {best_val_loss:.4f}"

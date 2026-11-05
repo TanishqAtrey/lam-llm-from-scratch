@@ -41,6 +41,7 @@ def test_base_model(model_path, tokenizer_path=None):
         "Python is a programming language that",
         "In the morning, the sun rises and",
         "The three primary colors are",
+        "def_isprime(n)",
     ]
 
     print("Testing with RAW text prompts (no template):")

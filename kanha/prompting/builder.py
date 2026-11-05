@@ -80,6 +80,14 @@ class PromptBuilder:
         Returns:
             Formatted prompt string ready for tokenization
         """
+        import re
+        # Normalise single-turn role prefixes (e.g. User: or Human:) and extract dialogue history if present
+        if not memory_context and re.search(r'(?i)(?:^|\n)\s*(?:human|user|assistant)\s*:', instruction):
+            history, inst = self.parse_dialogue(instruction)
+            instruction = inst
+            if history:
+                memory_context = history
+
         parts = []
 
         # System rules
@@ -114,6 +122,19 @@ class PromptBuilder:
 
         return "".join(parts)
 
+    def build_prompt_prefix(self, instruction: str, memory_context: str = "") -> tuple[str, str]:
+        """
+        Returns (prompt_prefix, cleaned_instruction) with consistent dialogue/role parsing.
+        """
+        import re
+        if not memory_context and re.search(r'(?i)(?:^|\n)\s*(?:human|user|assistant)\s*:', instruction):
+            history, inst = self.parse_dialogue(instruction)
+            instruction = inst
+            if history:
+                memory_context = history
+        prefix = self.build(instruction=instruction, memory_context=memory_context)
+        return prefix, instruction
+
     def build_training_pair(self, instruction: str, response: str, memory_context: str = "") -> str:
         """
         Builds the full training sequence (instruction + response).
@@ -121,35 +142,36 @@ class PromptBuilder:
         it formats with '### Conversation History:' to ensure 100% inference template match.
         Used by sft_train.py and dpo_train.py to ensure template consistency.
         """
-        import re
-        if not memory_context and re.search(r'(?i)(?:^|\n)\s*(?:human|user|assistant)\s*:', instruction):
-            history, inst = self.parse_dialogue(instruction)
-            if history:
-                memory_context, instruction = history, inst
-
-        if memory_context:
-            return f"### Conversation History:\n{memory_context}\n\n### Instruction:\n{instruction}\n\n### Response:\n{response}"
-        return FULL_TEMPLATE.format(instruction=instruction, response=response)
+        prefix, _ = self.build_prompt_prefix(instruction, memory_context=memory_context)
+        return prefix + response
 
     @staticmethod
     def parse_dialogue(text: str) -> tuple[str, str]:
         """
         Parses multi-turn dialogue into (memory_context, last_instruction).
         Handles formats like:
-          Human: ... \\n\\nAssistant: ... \\n\\nHuman: ...
-          User: ... \\n\\nAssistant: ... \\n\\nUser: ...
+          Human: ... \n\nAssistant: ... \n\nHuman: ...
+          User: ... \n\nAssistant: ... \n\nUser: ...
         If single turn or no dialogue markers, returns ('', clean_text).
+        If text starts with a non-role preamble (e.g. "Summarize this conversation:\nUser: ..."),
+        it does not destroy the preamble and treats the text as a task instruction.
         """
         import re
         text = text.strip()
+
+        # Only reparse as multi-turn dialogue if the text actually begins with a role marker.
+        # This prevents dropping preambles like "Summarize the following conversation:\nUser: ..."
+        is_role_start = bool(re.match(r'^(?:human|user|assistant)\s*:', text, re.IGNORECASE))
+        if not is_role_start:
+            return "", text
+
         pattern = re.compile(r'(?i)(?:^|\n)\s*(human|user|assistant)\s*:\s*', re.MULTILINE)
         matches = list(pattern.finditer(text))
         if not matches:
             clean = text
-            if clean.lower().startswith("human:"):
-                clean = clean[6:].strip()
-            elif clean.lower().startswith("user:"):
-                clean = clean[5:].strip()
+            for prefix in ("human:", "user:", "assistant:"):
+                if clean.lower().startswith(prefix):
+                    clean = clean[len(prefix):].strip()
             return "", clean
 
         roles = [m.group(1).lower() for m in matches]
@@ -157,10 +179,9 @@ class PromptBuilder:
         has_user = any(r in ("human", "user") for r in roles)
         if not (has_assistant and has_user):
             clean = text
-            if clean.lower().startswith("human:"):
-                clean = clean[6:].strip()
-            elif clean.lower().startswith("user:"):
-                clean = clean[5:].strip()
+            for prefix in ("human:", "user:", "assistant:"):
+                if clean.lower().startswith(prefix):
+                    clean = clean[len(prefix):].strip()
             return "", clean
 
         pairs = []
@@ -175,12 +196,12 @@ class PromptBuilder:
         if not pairs:
             return "", text
 
-        # Find the last User turn for instruction; all prior turns become history
+        # Find the last User turn for instruction; all prior and trailing turns become history
         user_indices = [idx for idx, p in enumerate(pairs) if p[0] == "User"]
         if user_indices:
             last_u_idx = user_indices[-1]
             last_inst = pairs[last_u_idx][1]
-            history_pairs = pairs[:last_u_idx]
+            history_pairs = pairs[:last_u_idx] + pairs[last_u_idx + 1:]
             history_str = "\n".join(f"{role}: {content}" for role, content in history_pairs)
             return history_str, last_inst
 

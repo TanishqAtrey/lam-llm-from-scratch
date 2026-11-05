@@ -131,41 +131,29 @@ class Oracle:
         raw_tmpl = (info.get("goal") or "").lower() if "{" in info.get("goal", "") else ""
 
         # Step 2: determine the action based on goal intent without substring collisions
-        if raw_tmpl:
-            if any(k in raw_tmpl for k in ["done", "complete", "finish", "mark"]):
-                act2 = f"done(id={task_id})"
-            elif any(k in raw_tmpl for k in ["delete", "remove"]):
-                act2 = f"delete(id={task_id})"
-            elif "rename" in raw_tmpl or "new_title" in slots:
-                new_title = slots.get("new_title", "new task")
-                act2 = f'edit(id={task_id}, field=title, value="{new_title}")'
-            elif "tag" in raw_tmpl:
-                tag = slots.get("tag", "home")
-                act2 = f'edit(id={task_id}, field=tag, value={tag})'
-            elif bool(re.search(r"\bmove\b", raw_tmpl)) or "reschedule" in raw_tmpl:
-                due = info.get("due_phrase_val", "today")
-                act2 = f'edit(id={task_id}, field=due, value={due})'
-            elif "prio" in raw_tmpl or "change" in raw_tmpl or "set" in raw_tmpl:
-                prio = info.get("prio_val_val", info.get("prio_phrase_val", "med"))
-                act2 = f'edit(id={task_id}, field=priority, value={prio})'
-            else:
-                act2 = f"done(id={task_id})"
-        elif "new_title" in slots or "rename" in goal:
+        check_text = raw_tmpl if raw_tmpl else goal
+        is_title = ("rename" in check_text or "new_title" in slots)
+        is_tag = ("tag" in check_text and ("tag" in slots or "as" in check_text))
+        is_due = (bool(re.search(r"\bmove\b", check_text)) or "reschedule" in check_text or "due" in check_text)
+        is_prio = ("prio" in check_text or "priority" in check_text or "prio_phrase_val" in info or "prio_val_val" in info or any(p in check_text for p in ["high", "low", "med"]))
+        is_delete = any(k in check_text for k in ["delete", "remove"])
+
+        if is_title:
             new_title = slots.get("new_title", "new task")
             act2 = f'edit(id={task_id}, field=title, value="{new_title}")'
-        elif "tag" in slots and ("tag" in goal and "as" in goal):
+        elif is_tag:
             tag = slots.get("tag", "home")
             act2 = f'edit(id={task_id}, field=tag, value={tag})'
-        elif any(kw in goal for kw in ["mark", "complete", "done"]):
-            act2 = f"done(id={task_id})"
-        elif "delete" in goal or "remove" in goal:
-            act2 = f"delete(id={task_id})"
-        elif bool(re.search(r"\bmove\b", goal)) or "reschedule" in goal:
+        elif is_due:
             due = info.get("due_phrase_val", "today")
             act2 = f'edit(id={task_id}, field=due, value={due})'
-        elif "prio_phrase_val" in info or "prio_val_val" in info or "priority" in goal or (("change" in goal or "set" in goal) and any(p in goal for p in ["low", "med", "high", "prio"])):
+        elif is_prio:
             prio = info.get("prio_val_val", info.get("prio_phrase_val", "med"))
             act2 = f'edit(id={task_id}, field=priority, value={prio})'
+        elif is_delete:
+            act2 = f"delete(id={task_id})"
+        elif any(k in check_text for k in ["done", "complete", "finish", "mark"]):
+            act2 = f"done(id={task_id})"
         else:
             act2 = f"done(id={task_id})"
 

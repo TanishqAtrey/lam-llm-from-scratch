@@ -31,6 +31,8 @@ class TrajectoryGenerator:
     def _sample_world(self, rng, min_size=0, max_size=12, require_titles=None, unique_titles=False) -> list[dict]:
         size = rng.randint(min_size, max_size)
         tasks = []
+        status_choices = ['todo', 'in_progress', 'done']
+        status_weights = [0.65, 0.15, 0.20]
         
         if require_titles:
             for title in require_titles:
@@ -38,7 +40,8 @@ class TrajectoryGenerator:
                     'title': title,
                     'due': rng.choice(DUE_POOL),
                     'prio': rng.choice(PRIO_POOL),
-                    'tag': rng.choice(TAG_POOL)
+                    'tag': rng.choice(TAG_POOL),
+                    'status': rng.choices(status_choices, weights=status_weights)[0]
                 })
         
         if unique_titles:
@@ -51,7 +54,8 @@ class TrajectoryGenerator:
                         'title': title,
                         'due': rng.choice(DUE_POOL),
                         'prio': rng.choice(PRIO_POOL),
-                        'tag': rng.choice(TAG_POOL)
+                        'tag': rng.choice(TAG_POOL),
+                        'status': rng.choices(status_choices, weights=status_weights)[0]
                     })
         else:
             while len(tasks) < size:
@@ -59,7 +63,8 @@ class TrajectoryGenerator:
                     'title': rng.choice(TITLE_POOL),
                     'due': rng.choice(DUE_POOL),
                     'prio': rng.choice(PRIO_POOL),
-                    'tag': rng.choice(TAG_POOL)
+                    'tag': rng.choice(TAG_POOL),
+                    'status': rng.choices(status_choices, weights=status_weights)[0]
                 })
             
         return tasks
@@ -99,7 +104,9 @@ class TrajectoryGenerator:
                         unique_titles=(tier == 'tier3'),
                     )
                     for t in world_tasks:
-                        store.add(title=t['title'], due=t['due'], prio=t['prio'], tag=t['tag'])
+                        task_obj = store.add(title=t['title'], due=t['due'], prio=t['prio'], tag=t['tag'])
+                        if 'status' in t:
+                            task_obj.status = t['status']
                         
                     goal, info = sample_goal(tier, store, self.rng)
                     

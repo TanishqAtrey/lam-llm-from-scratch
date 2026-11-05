@@ -102,7 +102,8 @@ def _enforce_context_budget(input_ids: list[int], max_context: int, max_new_toke
     """
     Enforces that prompt length does not overflow the model's trained context window.
     If max_new_tokens < max_context, reserves max_new_tokens for generation.
-    If prompt exceeds available budget, truncates from the left while preserving BOS.
+    If prompt exceeds available budget, truncates while preserving BOS and critical
+    header structure (e.g. ### Instruction / ### Goal) instead of dropping the task statement.
     """
     if max_new_tokens < max_context:
         max_prompt_len = max(1, max_context - max_new_tokens)
@@ -112,10 +113,15 @@ def _enforce_context_budget(input_ids: list[int], max_context: int, max_new_toke
     if len(input_ids) > max_prompt_len:
         log.warning(
             f"Prompt length ({len(input_ids)}) exceeds prompt budget ({max_prompt_len} tokens for "
-            f"max_seq_len={max_context}, max_new_tokens={max_new_tokens}). Truncating prompt from the left."
+            f"max_seq_len={max_context}, max_new_tokens={max_new_tokens}). Truncating prompt."
         )
         if max_prompt_len == 1:
             return [input_ids[0]]
+        # Preserve BOS and task/goal header (first ~25% of budget) plus the latest context
+        head_reserve = max(2, min(max_prompt_len // 4, 64)) if max_prompt_len >= 4 else 1
+        tail_reserve = max_prompt_len - head_reserve
+        if head_reserve > 1:
+            return input_ids[:head_reserve] + input_ids[-tail_reserve:]
         return [input_ids[0]] + input_ids[-(max_prompt_len - 1):]
     return input_ids
 
@@ -194,9 +200,9 @@ def generate(
         logits, _, kv_caches = model(input_tensor, kv_caches=kv_caches, offset=cur_pos)
         cur_pos += input_tensor.shape[1]
 
-        # Repetition penalty over full context
-        if repetition_penalty != 1.0:
-            ctx = torch.tensor([generated], dtype=torch.long, device=device)
+        # Repetition penalty: only penalize tokens generated after prompt
+        if repetition_penalty != 1.0 and len(generated) > prompt_len:
+            ctx = torch.tensor([generated[prompt_len:]], dtype=torch.long, device=device)
             logits[:, -1, :] = apply_repetition_penalty(
                 logits[:, -1, :], ctx, repetition_penalty,
             )
@@ -221,10 +227,9 @@ def generate(
     new_ids = generated[prompt_len:]
     text = tokenizer.decode(new_ids, skip_special=True)
     if stop_sequences:
-        for seq in stop_sequences:
-            idx = text.find(seq)
-            if idx != -1:
-                text = text[:idx]
+        matched_indices = [text.find(seq) for seq in stop_sequences if seq in text]
+        if matched_indices:
+            text = text[:min(matched_indices)]
     return text
 
 
@@ -295,9 +300,9 @@ def generate_with_confidence(
         raw_last_logits = logits[:, -1, :].clone()
         raw_probs = F.softmax(raw_last_logits, dim=-1)
 
-        # Repetition penalty over full context
-        if repetition_penalty != 1.0:
-            ctx = torch.tensor([generated], dtype=torch.long, device=device)
+        # Repetition penalty: only penalize tokens generated after prompt
+        if repetition_penalty != 1.0 and len(generated) > prompt_len:
+            ctx = torch.tensor([generated[prompt_len:]], dtype=torch.long, device=device)
             logits[:, -1, :] = apply_repetition_penalty(
                 logits[:, -1, :], ctx, repetition_penalty,
             )
@@ -325,10 +330,9 @@ def generate_with_confidence(
     new_ids = generated[prompt_len:]
     text = tokenizer.decode(new_ids, skip_special=True)
     if stop_sequences:
-        for seq in stop_sequences:
-            idx = text.find(seq)
-            if idx != -1:
-                text = text[:idx]
+        matched_indices = [text.find(seq) for seq in stop_sequences if seq in text]
+        if matched_indices:
+            text = text[:min(matched_indices)]
 
     # Exclude stop tokens and stop sequences from confidence calculations
     # so confidence accurately reflects only the generated content tokens
@@ -439,8 +443,9 @@ def generate_stream(
         logits, _, kv_caches = model(input_tensor, kv_caches=kv_caches, offset=cur_pos)
         cur_pos += input_tensor.shape[1]
 
-        if repetition_penalty != 1.0:
-            ctx = torch.tensor([generated], dtype=torch.long, device=device)
+        # Repetition penalty: only penalize new tokens generated so far
+        if repetition_penalty != 1.0 and new_ids:
+            ctx = torch.tensor([new_ids], dtype=torch.long, device=device)
             logits[:, -1, :] = apply_repetition_penalty(
                 logits[:, -1, :], ctx, repetition_penalty,
             )
@@ -484,6 +489,10 @@ def generate_stream(
         if stop_sequences and any(seq in final_full for seq in stop_sequences):
             earliest_idx = min(final_full.find(seq) for seq in stop_sequences if seq in final_full)
             final_full = final_full[:earliest_idx]
+        elif stop_sequences:
+            prefix_len = _find_stop_prefix_len(final_full, stop_sequences)
+            if prefix_len > 0:
+                final_full = final_full[:-prefix_len]
         final_diff = final_full[len(prev_text):]
         if final_diff and "\ufffd" not in final_diff:
             yield final_diff

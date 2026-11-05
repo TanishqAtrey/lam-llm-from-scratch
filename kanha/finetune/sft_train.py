@@ -68,22 +68,18 @@ class SFTDataset(Dataset):
                 if not line:
                     continue
                 obj = json.loads(line)
-                if obj.get("instruction") and obj.get("response"):
-                    inst = obj["instruction"]
-                    resp = obj["response"]
-                    full = self.prompt_builder.build_training_pair(inst, resp)
-                    if "### Response:\n" in full:
-                        split_idx = full.rfind("### Response:\n") + len("### Response:\n")
-                        p_prefix = full[:split_idx]
-                        r_text = full[split_idx:]
-                    else:
-                        p_prefix = f"### Instruction:\n{inst}\n\n### Response:\n"
-                        r_text = resp
+                inst = obj.get("instruction") or obj.get("prompt", "")
+                if obj.get("input") and str(obj["input"]).strip():
+                    inst = f"{inst}\n\n{str(obj['input']).strip()}".strip() if inst else str(obj["input"]).strip()
+                resp = obj.get("response") or obj.get("output") or obj.get("completion", "")
+                if inst and resp and resp.strip():
+                    p_prefix, _ = self.prompt_builder.build_prompt_prefix(inst)
+                    r_text = resp.strip()
                     p_ids = self.tokenizer.encode(p_prefix, add_bos=True, add_eos=False)
                     r_ids = self.tokenizer.encode(r_text, add_bos=False, add_eos=True)
                     tot_len = len(p_ids) + len(r_ids)
-                    if tot_len <= self.max_len and len(r_ids) > 0:
-                        self.samples.append(obj)
+                    if tot_len <= self.max_len and len(self.tokenizer.encode(r_text, add_bos=False, add_eos=False)) > 0:
+                        self.samples.append({"instruction": inst, "response": r_text})
 
         log.info(f"Loaded {len(self.samples):,} valid SFT samples from {data_path}")
 
@@ -95,18 +91,10 @@ class SFTDataset(Dataset):
         instruction = sample["instruction"]
         response = sample["response"]
 
-        # ── Build full training sequence using the CANONICAL template ──
-        # This is "### Instruction:\n{instruction}\n\n### Response:\n{response}"
-        full_text = self.prompt_builder.build_training_pair(instruction, response)
-
-        # ── Compute instruction prefix and response text for boundary-safe tokenization ──
-        if "### Response:\n" in full_text:
-            split_idx = full_text.rfind("### Response:\n") + len("### Response:\n")
-            instruction_prefix = full_text[:split_idx]
-            resp_text = full_text[split_idx:]
-        else:
-            instruction_prefix = f"### Instruction:\n{instruction}\n\n### Response:\n"
-            resp_text = response
+        # ── Compute canonical instruction prefix and response text directly ──
+        # Avoids fragile string-searching (e.g. rfind) which breaks if response contains delimiters
+        instruction_prefix, _ = self.prompt_builder.build_prompt_prefix(instruction)
+        resp_text = response
 
         # ── Tokenize prompt and response separately to prevent BPE boundary-piece merging ──
         instruction_ids = self.tokenizer.encode(
@@ -119,7 +107,7 @@ class SFTDataset(Dataset):
         mask_len = len(instruction_ids)
 
         if len(full_ids) > self.max_len:
-            full_ids = full_ids[:self.max_len]
+            full_ids = full_ids[:self.max_len - 1] + [self.tokenizer.EOS_ID]
 
         # ── Create shifted input/target pairs ──
         # Standard causal LM: input = tokens[:-1], target = tokens[1:]
@@ -170,12 +158,14 @@ def _eval_val_loss(model, val_loader, device):
     model.eval()
     total_loss = 0.0
     n = 0
+    use_amp = (device.type == "cuda")
     for batch in val_loader:
         input_ids = batch["input_ids"].to(device)
         labels = batch["labels"].to(device)
         if not (labels != -100).any():
             continue
-        _, loss, _ = model(input_ids, targets=labels)
+        with torch.amp.autocast("cuda", enabled=use_amp):
+            _, loss, _ = model(input_ids, targets=labels)
         total_loss += loss.item()
         n += 1
     model.train()
@@ -218,15 +208,13 @@ def sft_train(args):
             target_modules=getattr(cfg.lora, "target_modules", ["q_proj", "v_proj"]),
         )
         model.print_trainable_params()
-        import sys
-        lr_explicit = any(arg == "--lr" or arg.startswith("--lr=") for arg in sys.argv)
-        if not lr_explicit and getattr(args, "lr", 3e-5) <= 3e-5:
+        if getattr(args, "lr", None) is None:
             default_lora_lr = 1e-4
-            log.info(
-                f"LoRA enabled: adjusting default SFT learning rate from {args.lr} to {default_lora_lr} "
-                f"(LoRA adapters require higher LR than full fine-tuning)"
-            )
+            log.info(f"LoRA enabled: setting default SFT learning rate to {default_lora_lr}")
             args.lr = default_lora_lr
+
+    if getattr(args, "lr", None) is None:
+        args.lr = 3e-5
 
     model.train()
     model.to(device)
@@ -235,22 +223,30 @@ def sft_train(args):
     tokenizer = KanhaTokenizer()
 
     # ── Dataset with train/val split ──
-    full_dataset = SFTDataset(args.data, tokenizer, max_len=cfg.model.max_seq_len)
-    val_size = max(1, int(len(full_dataset) * val_fraction))
+    model_max_len = getattr(model, "max_seq_len", getattr(getattr(model, "model", None), "max_seq_len", cfg.model.max_seq_len))
+    full_dataset = SFTDataset(args.data, tokenizer, max_len=model_max_len)
+    val_size = max(1, int(len(full_dataset) * val_fraction)) if len(full_dataset) > 10 else 0
     train_size = len(full_dataset) - val_size
-    train_dataset, val_dataset = torch.utils.data.random_split(
-        full_dataset, [train_size, val_size],
-        generator=torch.Generator().manual_seed(42),
-    )
+    if val_size > 0 and train_size > 0:
+        train_dataset, val_dataset = torch.utils.data.random_split(
+            full_dataset, [train_size, val_size],
+            generator=torch.Generator().manual_seed(42),
+        )
+        val_loader = DataLoader(
+            val_dataset, batch_size=args.batch_size,
+            shuffle=False, drop_last=False, num_workers=0,
+            collate_fn=sft_collate_fn,
+        )
+    else:
+        train_dataset = full_dataset
+        train_size = len(full_dataset)
+        val_dataset = None
+        val_size = 0
+        val_loader = None
 
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size,
         shuffle=True, drop_last=False, num_workers=0,
-        collate_fn=sft_collate_fn,
-    )
-    val_loader = DataLoader(
-        val_dataset, batch_size=args.batch_size,
-        shuffle=False, drop_last=False, num_workers=0,
         collate_fn=sft_collate_fn,
     )
 
@@ -303,6 +299,11 @@ def sft_train(args):
              f"train={train_size:,} | val={val_size:,}")
     log.info(f"Total optim steps: {total_steps:,} | Warmup: {warmup_steps} | Patience: {patience}")
 
+    use_amp = (device.type == "cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    if use_amp:
+        log.info("AMP FP16 mixed precision enabled for SFT")
+
     for epoch in range(args.epochs):
         epoch_loss = 0
         n_batches = 0
@@ -322,19 +323,22 @@ def sft_train(args):
                         for p in model.parameters():
                             if p.grad is not None:
                                 p.grad.data.mul_(scale_factor)
+                    scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.training.grad_clip)
-                    optimizer.step()
+                    scaler.step(optimizer)
+                    scaler.update()
                     scheduler.step()
                     optimizer.zero_grad()
                     accum_count = 0
                 continue
 
-            # Forward
-            logits, loss, _ = model(input_ids, targets=labels)
+            # Forward with AMP
+            with torch.amp.autocast("cuda", enabled=use_amp):
+                logits, loss, _ = model(input_ids, targets=labels)
+                loss_scaled = loss / grad_accum_steps
 
             # Backward with gradient accumulation
-            loss_scaled = loss / grad_accum_steps
-            loss_scaled.backward()
+            scaler.scale(loss_scaled).backward()
             accum_count += 1
 
             is_accum_boundary = (accum_count % grad_accum_steps == 0)
@@ -349,8 +353,10 @@ def sft_train(args):
                         if p.grad is not None:
                             p.grad.data.mul_(scale_factor)
 
+                scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.training.grad_clip)
-                optimizer.step()
+                scaler.step(optimizer)
+                scaler.update()
                 scheduler.step()
                 optimizer.zero_grad()
                 accum_count = 0
@@ -366,7 +372,7 @@ def sft_train(args):
         avg_train = epoch_loss / max(n_batches, 1)
 
         # ── Validation ──
-        val_loss = _eval_val_loss(model, val_loader, device)
+        val_loss = _eval_val_loss(model, val_loader, device) if val_loader else avg_train
         log.info(
             f"Epoch {epoch+1} | Train Loss: {avg_train:.4f} | "
             f"Val Loss: {val_loss:.4f} | Best Val: {best_val_loss:.4f}"

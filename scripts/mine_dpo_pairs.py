@@ -74,15 +74,6 @@ def _is_true_success(case: dict, result, env: TaskEnvironment, reference_date: s
     if canonicalize(expected_tasks) != canonicalize(final_tasks):
         return False
 
-    # Check side effects
-    initial_tasks = case.get('world', [])
-    init_set = set(_canonical_task(t, reference_date) for t in (list(initial_tasks.values()) if isinstance(initial_tasks, dict) else initial_tasks))
-    final_set = set(_canonical_task(t, reference_date) for t in final_tasks)
-    exp_set = set(_canonical_task(t, reference_date) for t in expected_tasks)
-    untouched_expected = init_set & exp_set
-    if (untouched_expected - final_set) or (final_set - (init_set | exp_set)):
-        return False
-
     expected_reply = case.get('expected_reply')
     if expected_reply:
         reply = (result.final_message or "").lower()

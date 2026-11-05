@@ -16,6 +16,7 @@ import os
 import sys
 
 from kanha.utils.logging import get_logger
+from kanha.utils.config import cfg
 
 log = get_logger("main")
 
@@ -86,9 +87,10 @@ def main():
     dpo_p.add_argument("--epochs",     type=int, default=1)
     dpo_p.add_argument("--batch_size", type=int, default=1)
     dpo_p.add_argument("--grad_accum_steps", type=int, default=4, help="Gradient accumulation steps (default 4)")
-    dpo_p.add_argument("--lr",         type=float, default=5e-6,
-                        help="Learning rate for full DPO fine-tuning (default 5e-6; auto-adjusts to 5e-5 if --lora is set)")
-    dpo_p.add_argument("--beta",       type=float, default=0.1)
+    dpo_p.add_argument("--lr",         type=float, default=None,
+                        help="Learning rate for DPO fine-tuning (default: config.yaml cfg.dpo.learning_rate or 1e-6 / 5e-5 for LoRA)")
+    dpo_p.add_argument("--beta",       type=float, default=None,
+                        help="DPO temperature parameter beta (default: config.yaml cfg.dpo.beta or 0.1)")
     dpo_p.add_argument("--length_norm", action="store_true", help="Normalize sequence log probs by length")
     dpo_p.add_argument("--lam_mode",   action="store_true", help="Enable LAM DPO mode for agent trajectories")
     dpo_p.add_argument("--lora",       action="store_true", help="Enable LoRA adapter for policy model")
@@ -134,9 +136,10 @@ def main():
     lamdpo_p.add_argument("--epochs",     type=int, default=1)
     lamdpo_p.add_argument("--batch_size", type=int, default=1)
     lamdpo_p.add_argument("--grad_accum_steps", type=int, default=4, help="Gradient accumulation steps (default 4)")
-    lamdpo_p.add_argument("--lr",         type=float, default=5e-6,
-                           help="Learning rate for full DPO fine-tuning (default 5e-6; auto-adjusts to 5e-5 if --lora is set)")
-    lamdpo_p.add_argument("--beta",       type=float, default=0.1)
+    lamdpo_p.add_argument("--lr",         type=float, default=None,
+                           help="Learning rate for LAM DPO fine-tuning (default: config.yaml cfg.dpo.learning_rate or 1e-6 / 5e-5 for LoRA)")
+    lamdpo_p.add_argument("--beta",       type=float, default=None,
+                           help="DPO temperature parameter beta (default: config.yaml cfg.dpo.beta or 0.1)")
     lamdpo_p.add_argument("--length_norm", action="store_true", help="Normalize sequence log probs by length")
     lamdpo_p.add_argument("--lora",       action="store_true", help="Enable LoRA adapter for policy model")
 
@@ -159,8 +162,8 @@ def main():
     # ── mine-dpo ──────────────────────────────────────────────────────────
     mine_p = sub.add_parser("mine-dpo", help="Auto-mine DPO pairs from agent trajectories")
     mine_p.add_argument("--model",     required=True)
-    mine_p.add_argument("--eval_data", default="data/lam/train.jsonl",
-                        help="JSONL with goals, worlds, and oracle steps (use train.jsonl to avoid test contamination)")
+    mine_p.add_argument("--eval_data", default="data/lam/val.jsonl",
+                        help="JSONL with goals, worlds, and oracle steps (defaults to val.jsonl to discover unseen model failure modes)")
     mine_p.add_argument("--output",    default="data/lam/dpo_pairs.jsonl")
     mine_p.add_argument("--max_goals", type=int, default=500,
                         help="Max goals to evaluate (default 500)")
@@ -195,6 +198,10 @@ def main():
 
     elif args.command == "dpo":
         from kanha.finetune.dpo_train import dpo_train
+        if getattr(args, "lr", None) is None:
+            args.lr = getattr(cfg.dpo, "learning_rate", 1e-6)
+        if getattr(args, "beta", None) is None:
+            args.beta = getattr(cfg.dpo, "beta", 0.1)
         dpo_train(args)
 
     elif args.command == "index":
@@ -213,13 +220,24 @@ def main():
     elif args.command == "lam-dpo":
         from kanha.finetune.dpo_train import dpo_train
         args.lam_mode = True
+        if getattr(args, "lr", None) is None:
+            args.lr = getattr(cfg.dpo, "learning_rate", 1e-6)
+        if getattr(args, "beta", None) is None:
+            args.beta = getattr(cfg.dpo, "beta", 0.1)
         if not os.path.exists(args.base_model):
             base_dir = os.path.dirname(args.base_model) or "models/lam"
-            alt_name = "lam_sft.pt" if args.base_model.endswith("lam_final.pt") else "lam_final.pt"
-            alt = os.path.join(base_dir, alt_name)
-            if os.path.exists(alt):
-                log.info(f"Base model '{args.base_model}' not found, falling back to existing '{alt}'")
-                args.base_model = alt
+            candidates = [
+                os.path.join(base_dir, "lam_final.pt"),
+                os.path.join(base_dir, "lam_epoch3.pt"),
+                os.path.join(base_dir, "lam_epoch2.pt"),
+                os.path.join(base_dir, "lam_epoch1.pt"),
+                os.path.join(base_dir, "lam_sft.pt"),
+            ]
+            for cand in candidates:
+                if os.path.exists(cand):
+                    log.info(f"Base model '{args.base_model}' not found, falling back to existing '{cand}'")
+                    args.base_model = cand
+                    break
         dpo_train(args)
 
     elif args.command == "agent":

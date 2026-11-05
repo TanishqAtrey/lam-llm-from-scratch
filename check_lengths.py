@@ -22,6 +22,8 @@ def main():
         print("Error: sentencepiece is required. Run: pip install sentencepiece", file=sys.stderr)
         sys.exit(1)
 
+    from kanha.prompting.builder import PromptBuilder
+    builder = PromptBuilder(include_rules=False)
     tok = KanhaTokenizer(model_path=args.tokenizer) if args.tokenizer else KanhaTokenizer()
     lengths = []
 
@@ -33,9 +35,10 @@ def main():
             s = json.loads(line)
             instr = s.get("instruction", s.get("prompt", ""))
             resp = s.get("response", s.get("completion", ""))
-            instr_len = len(tok.encode(instr))
-            resp_len  = len(tok.encode(resp))
-            lengths.append(instr_len + resp_len)
+            p_prefix, _ = builder.build_prompt_prefix(instr)
+            p_ids = tok.encode(p_prefix, add_bos=True, add_eos=False)
+            r_ids = tok.encode(resp, add_bos=False, add_eos=True)
+            lengths.append(len(p_ids) + len(r_ids))
 
     total = len(lengths)
     if total == 0:

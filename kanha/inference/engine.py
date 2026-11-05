@@ -183,6 +183,17 @@ class InferenceEngine:
                     device=self.device,
                 ):
                     step_parts.append(token_text)
+                    current_stream = "".join(step_parts)
+                    try:
+                        from kanha.alignment.filters import is_safe
+                        safe, refusal = is_safe(current_stream)
+                        if not safe:
+                            yield f"\n{refusal}"
+                            mem.add("user", user_message)
+                            mem.add("assistant", refusal)
+                            return
+                    except ImportError:
+                        pass
                     yield token_text
 
                 gen_text = "".join(step_parts)
@@ -213,6 +224,17 @@ class InferenceEngine:
                 device=self.device,
             ):
                 response_parts.append(token_text)
+                current_stream = "".join(response_parts)
+                try:
+                    from kanha.alignment.filters import is_safe
+                    safe, refusal = is_safe(current_stream)
+                    if not safe:
+                        yield f"\n{refusal}"
+                        mem.add("user", user_message)
+                        mem.add("assistant", refusal)
+                        return
+                except ImportError:
+                    pass
                 yield token_text
 
             final_response = "".join(response_parts)

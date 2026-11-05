@@ -64,7 +64,7 @@ class LAMDPODataset(Dataset):
         mask_len = len(prompt_tokens)
 
         if len(full_ids) > self.max_len:
-            full_ids = full_ids[:self.max_len]
+            full_ids = full_ids[:self.max_len - 1] + [self.tokenizer.EOS_ID]
         
         # Standard shifted input/target pairs
         input_ids = full_ids[:-1]

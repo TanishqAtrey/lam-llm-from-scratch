@@ -139,7 +139,30 @@ class KanhaModel(nn.Module):
 
     @classmethod
     def from_pretrained(cls, path: str, device: Optional[torch.device] = None) -> "KanhaModel":
-        device     = device or get_device()
+        device = device or get_device()
+        import os
+        if os.path.isdir(path):
+            candidates = [
+                os.path.join(path, "final_model.pt"),
+                os.path.join(path, "sft_final.pt"),
+                os.path.join(path, "dpo_best.pt"),
+                os.path.join(path, "dpo_final.pt"),
+                os.path.join(path, "lam_final.pt"),
+                os.path.join(path, "best_model.pt"),
+                os.path.join(path, "model.pt"),
+            ]
+            chosen = None
+            for cand in candidates:
+                if os.path.isfile(cand):
+                    chosen = cand
+                    break
+            if chosen is None:
+                pt_files = sorted([os.path.join(path, f) for f in os.listdir(path) if f.endswith(".pt")])
+                if pt_files:
+                    chosen = pt_files[-1]
+                else:
+                    raise FileNotFoundError(f"No .pt checkpoint found in directory: {path}")
+            path = chosen
         checkpoint = torch.load(path, map_location=device, weights_only=False)
         model      = cls(**checkpoint.get("model_config", {}))
         model.load_state_dict(checkpoint["model_state"])

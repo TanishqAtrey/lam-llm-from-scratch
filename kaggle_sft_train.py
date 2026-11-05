@@ -45,35 +45,33 @@ def run_kaggle_pipeline():
     # STEP 3: Extract code and setup directory structure
     # ══════════════════════════════════════════════════════════════════
 
-    # Extract code
+    EXTRACT_DIR = "/kaggle/working/kanha_extracted"
+    os.makedirs(EXTRACT_DIR, exist_ok=True)
     os.makedirs(WORK_DIR, exist_ok=True)
-    with zipfile.ZipFile(CODE_ZIP, 'r') as z:
-        z.extractall("/kaggle/working/")
 
-    # Find the extracted directory dynamically
-    extracted = None
-    candidates = [
-        "/kaggle/working/kanha-source/kanha-source-clean",
-        "/kaggle/working/kanha-source",
-        "/kaggle/working/decoder-only-transformer-from-scratch-main",
-        "/kaggle/working/kanha-fixed",
-    ]
-    for c in candidates:
-        if os.path.exists(os.path.join(c, "kanha")) or os.path.exists(os.path.join(c, "main.py")):
-            extracted = c
-            break
+    # Extract code safely into EXTRACT_DIR to avoid self-nesting directory collision
+    if os.path.exists(CODE_ZIP):
+        with zipfile.ZipFile(CODE_ZIP, 'r') as z:
+            z.extractall(EXTRACT_DIR)
 
-    if not extracted:
-        for root, dirs, files in os.walk("/kaggle/working"):
-            if "main.py" in files and "kanha" in dirs and os.path.abspath(root) != os.path.abspath(WORK_DIR):
-                extracted = root
+        # Find the root directory containing main.py and kanha package
+        source_dir = None
+        for root, dirs, files in os.walk(EXTRACT_DIR):
+            if "main.py" in files and "kanha" in dirs:
+                source_dir = root
                 break
 
-    if extracted and os.path.abspath(extracted) != os.path.abspath(WORK_DIR):
-        # Move contents to WORK_DIR
-        if os.path.exists(WORK_DIR):
-            shutil.rmtree(WORK_DIR)
-        shutil.move(extracted, WORK_DIR)
+        if source_dir:
+            for item in os.listdir(source_dir):
+                s = os.path.join(source_dir, item)
+                d = os.path.join(WORK_DIR, item)
+                if os.path.isdir(s):
+                    shutil.copytree(s, d, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(s, d)
+        shutil.rmtree(EXTRACT_DIR, ignore_errors=True)
+    else:
+        print(f"Warning: CODE_ZIP not found at {CODE_ZIP}. Checking if repository already in {WORK_DIR}...")
 
     os.chdir(WORK_DIR)
     print(f"Working directory: {os.getcwd()}")
@@ -135,11 +133,15 @@ def run_kaggle_pipeline():
     # Verify SFT data loads
     with open("data/processed/sft_combined.jsonl") as f:
         sample = json.loads(f.readline())
-    assert "instruction" in sample and "response" in sample, "Bad SFT data format!"
+    has_inst = "instruction" in sample or "prompt" in sample
+    has_resp = "response" in sample or "output" in sample or "completion" in sample
+    assert has_inst and has_resp, f"Bad SFT data format! Keys found: {list(sample.keys())}"
+    inst_key = "instruction" if "instruction" in sample else "prompt"
+    resp_key = "response" if "response" in sample else ("output" if "output" in sample else "completion")
     print(f"SFT data format verified: keys={list(sample.keys())}")
 
     # Test tokenization roundtrip
-    test_text = builder.build_training_pair(sample["instruction"], sample["response"])
+    test_text = builder.build_training_pair(sample[inst_key], sample[resp_key])
     ids = tokenizer.encode(test_text, add_bos=True, add_eos=True)
     decoded = tokenizer.decode(ids)
     print(f"Tokenization roundtrip OK: {len(ids)} tokens")
@@ -160,7 +162,8 @@ def run_kaggle_pipeline():
         data="data/processed/sft_combined.jsonl",
         output="models/finetuned/",
         epochs=2,          # 2 epochs is safe for a 40-60M model
-        batch_size=4,      # increase to 8 if GPU memory allows
+        batch_size=8,      # AMP FP16 allows batch_size=8 on Kaggle T4/P100
+        grad_accum_steps=4,# Effective batch size = 32
         lr=3e-5,           # safe learning rate
         val_fraction=0.1,  # 10% held-out for validation
         patience=3,        # early stop after 3 epochs without val improvement
@@ -202,6 +205,7 @@ def run_kaggle_pipeline():
             top_k=50,
             top_p=0.9,
             repetition_penalty=1.1,
+            stop_sequences=["\n### Instruction:", "### Instruction:", "### Conversation History:"],
             device=device,
         )
         print(f"Q: {q}")

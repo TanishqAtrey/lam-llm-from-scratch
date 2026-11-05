@@ -33,7 +33,7 @@ def check_checkpoint(model_path):
         print(f"  ERROR: File not found: {model_path}")
         return None
 
-    checkpoint = torch.load(model_path, map_location="cpu")
+    checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
 
     if not isinstance(checkpoint, dict):
         print(f"  ERROR: Checkpoint is not a dict (type: {type(checkpoint)})")
@@ -190,7 +190,7 @@ def check_weight_tying(model_path):
     print(f"  4. WEIGHT TYING CHECK")
     print(f"{'='*60}")
 
-    checkpoint = torch.load(model_path, map_location="cpu")
+    checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
     state = checkpoint.get("model_state", checkpoint)
 
     emb_key = "token_emb.weight"

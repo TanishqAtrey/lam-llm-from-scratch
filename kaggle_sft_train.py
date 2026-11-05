@@ -31,7 +31,8 @@ def find_file(filename: str, search_roots: list[str]) -> str | None:
     return None
 
 
-def run_kaggle_sft():
+def run_kaggle_sft(epochs: int = 2):
+    import re
     print("=" * 65)
     print("  KANHA SFT TRAINING PIPELINE (KAGGLE RUNNER)")
     print("=" * 65)
@@ -67,25 +68,51 @@ def run_kaggle_sft():
 
     # ── 3. Locate Model & Tokenizer ───────────────────────────────────────────
     print("\n[Step 2/6] Locating base model and tokenizer...")
-    base_model_path = find_file("final_model.pt", search_dirs)
-    if not base_model_path:
-        base_model_path = find_file("best_model.pt", search_dirs)
-    if not base_model_path:
-        # Check for any step checkpoint e.g. ckpt_step*.pt
-        for root in search_dirs:
-            if os.path.exists(root):
-                for dirpath, _, filenames in os.walk(root):
-                    pts = [f for f in filenames if f.endswith(".pt") and "model" in f or "ckpt" in f]
-                    if pts:
-                        base_model_path = os.path.join(dirpath, sorted(pts)[-1])
-                        break
-            if base_model_path:
-                break
+
+    # Scan for all available checkpoints in inputs
+    all_ckpts = []
+    for root in search_dirs:
+        if os.path.exists(root):
+            for dirpath, _, filenames in os.walk(root):
+                for f in filenames:
+                    if f.endswith(".pt") and not f.startswith("sft_"):
+                        all_ckpts.append(os.path.join(dirpath, f))
+
+    print(f"  Found {len(all_ckpts)} candidate model checkpoint(s):")
+    for c in all_ckpts:
+        size_mb = os.path.getsize(c) / (1024 * 1024)
+        print(f"    • {c} ({size_mb:.1f} MB)")
+
+    # Intelligent priority selection:
+    # 1. final_model.pt
+    # 2. best_model.pt
+    # 3. ckpt_step{N}.pt with highest numerical step N
+    base_model_path = None
+    final_candidates = [c for c in all_ckpts if os.path.basename(c) == "final_model.pt"]
+    best_candidates = [c for c in all_ckpts if os.path.basename(c) == "best_model.pt"]
+    step_candidates = [c for c in all_ckpts if "ckpt_step" in os.path.basename(c)]
+
+    if final_candidates:
+        base_model_path = final_candidates[0]
+        print(f"  => Selected: 'final_model.pt'")
+    elif best_candidates:
+        base_model_path = best_candidates[0]
+        print(f"  => Selected: 'best_model.pt'")
+    elif step_candidates:
+        def extract_step(path):
+            m = re.search(r'step(\d+)', os.path.basename(path))
+            return int(m.group(1)) if m else 0
+        step_candidates.sort(key=extract_step)
+        base_model_path = step_candidates[-1]
+        print(f"  => Selected highest step checkpoint: '{os.path.basename(base_model_path)}'")
+    elif all_ckpts:
+        base_model_path = all_ckpts[0]
+        print(f"  => Selected fallback checkpoint: '{os.path.basename(base_model_path)}'")
 
     tok_path = find_file("tokenizer.model", search_dirs)
 
-    print(f"  Base Model : {base_model_path}")
-    print(f"  Tokenizer  : {tok_path}")
+    print(f"  Final Chosen Base Model : {base_model_path}")
+    print(f"  Tokenizer Path          : {tok_path}")
 
     assert base_model_path and os.path.exists(base_model_path), "FATAL: Could not find base model .pt checkpoint!"
     assert tok_path and os.path.exists(tok_path), "FATAL: Could not find tokenizer.model!"
@@ -165,7 +192,7 @@ def run_kaggle_sft():
         data=str(train_data_path),
         val_data=str(val_data_path) if val_data_path else None,
         output=str(work_dir / "models" / "finetuned"),
-        epochs=3,              # 3 full epochs for 250k mix
+        epochs=epochs,          # 2 epochs is optimal for 250k mix (prevents catastrophic forgetting)
         batch_size=8,          # Safe dynamic batch size (<2.5GB peak VRAM)
         grad_accum_steps=4,    # Effective batch size = 32 (8 * 4)
         lr=3e-5,               # Conservative learning rate to preserve pretrained weights
@@ -222,4 +249,8 @@ def run_kaggle_sft():
 
 
 if __name__ == "__main__":
-    run_kaggle_sft()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--epochs", type=int, default=2, help="Number of SFT epochs (default: 2)")
+    cli_args = parser.parse_args()
+    run_kaggle_sft(epochs=cli_args.epochs)

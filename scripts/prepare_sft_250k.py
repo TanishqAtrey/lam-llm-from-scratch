@@ -424,6 +424,9 @@ def prepare_sft_dataset(
     rng.shuffle(smol_indices)
 
     log.info("Scanning and filtering Smol-SmolTalk candidates...")
+    total_collected = 0
+    pool_target = target_smol_count + 35000
+
     for idx in smol_indices:
         row = ds_smol[idx]
         src = row.get("source", "other")
@@ -432,19 +435,16 @@ def prepare_sft_dataset(
         if norm_p not in seen_prompts and is_valid_sample(inst, resp, tokenizer, max_len=1024):
             seen_prompts.add(norm_p)
             by_source[src].append({"instruction": inst, "response": resp, "source": f"smoltalk-{src}"})
+            total_collected += 1
+            if total_collected >= pool_target:
+                break
 
-        # Early termination once we have sufficient pool (~260k valid samples)
-        total_collected = sum(len(v) for v in by_source.values())
-        if total_collected >= target_smol_count + 35000:
-            break
-
-    total_valid_smol = sum(len(v) for v in by_source.values())
-    log.info(f"Collected {total_valid_smol:,} valid candidates across {len(by_source)} sources.")
+    log.info(f"Collected {total_collected:,} valid candidates across {len(by_source)} sources.")
 
     # Stratified selection to maintain original source proportions
     smol_selected = []
     remaining_targets = {}
-    total_pool = sum(len(v) for v in by_source.values())
+    total_pool = total_collected
 
     for src, items in by_source.items():
         proportion = len(items) / total_pool
@@ -464,7 +464,9 @@ def prepare_sft_dataset(
             if deficit <= 0:
                 break
 
-    log.info(f"Selected {len(smol_selected):,} Smol-SmolTalk samples.")
+    # If any slight surplus due to rounding, clamp to exact target
+    smol_selected = smol_selected[:target_smol_count]
+    log.info(f"Selected exactly {len(smol_selected):,} Smol-SmolTalk samples.")
 
     # ──────────────────────────────────────────────────────────────────────────
     # 6. Combine, Final Validation, and Shuffle

@@ -47,22 +47,23 @@ def run_kaggle_sft():
 
     # ── 2. Sync Repository Code ───────────────────────────────────────────────
     print("\n[Step 1/6] Setting up project code...")
-    kanha_pkg = find_file("setup.py", ["/kaggle/input"])
-    if kanha_pkg:
-        src_repo = os.path.dirname(kanha_pkg)
-        print(f"Found project repository at: {src_repo}")
-        for item in os.listdir(src_repo):
-            s = os.path.join(src_repo, item)
-            d = work_dir / item
-            if os.path.isdir(s) and item not in [".git", "__pycache__", "venv"]:
-                shutil.copytree(s, d, dirs_exist_ok=True)
-            elif os.path.isfile(s):
-                shutil.copy2(s, d)
+    if (work_dir / "kanha").exists() and (work_dir / "setup.py").exists():
+        print(f"Using up-to-date repository code in {work_dir}")
     else:
-        # Check if already in git repo
-        if not (work_dir / "kanha").exists():
+        kanha_pkg = find_file("setup.py", ["/kaggle/input"])
+        if kanha_pkg:
+            src_repo = os.path.dirname(kanha_pkg)
+            print(f"Found project repository in input at: {src_repo}")
+            for item in os.listdir(src_repo):
+                s = os.path.join(src_repo, item)
+                d = work_dir / item
+                if os.path.isdir(s) and item not in [".git", "__pycache__", "venv"]:
+                    shutil.copytree(s, d, dirs_exist_ok=True)
+                elif os.path.isfile(s):
+                    shutil.copy2(s, d)
+        else:
             print("Cloning repository from GitHub...")
-            subprocess.run(["git", "clone", "https://github.com/tanishqatrey/kanha.git", str(work_dir)], check=True)
+            subprocess.run(["git", "clone", "https://github.com/TanishqAtrey/lam-llm-from-scratch.git", str(work_dir)], check=True)
 
     # ── 3. Locate Model & Tokenizer ───────────────────────────────────────────
     print("\n[Step 2/6] Locating base model and tokenizer...")

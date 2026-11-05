@@ -38,6 +38,8 @@ def main():
                         help="Sampling temperature (default: from config, 0.2)")
     chat_p.add_argument("--max_tokens", "--max_new_tokens", dest="max_new_tokens", type=int, default=None,
                         help="Max new tokens to generate (default: from config, 160)")
+    chat_p.add_argument("--no-history", "--no_history", dest="no_history", action="store_true",
+                        help="Disable conversation history memory")
 
     # ── train ─────────────────────────────────────────────────────────────
     train_p = sub.add_parser("train", aliases=["pretrain"], help="Pre-train from scratch")

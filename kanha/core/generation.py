@@ -33,31 +33,59 @@ DEFAULT_STOP_SEQUENCES = [
 
 def _has_sentence_repetition(text: str) -> bool:
     """
-    Detects if the generated text is trapped in a repetitive sentence loop.
-    Returns True if:
-      - The same sentence (>15 chars) is repeated 2 times consecutively, OR
-      - Any sentence (>15 chars) appears 3 or more times.
+    Detects if the generated text is trapped in a repetitive loop:
+      1. Single word repeated 3 times in a row (e.g. '#!/bin/bash #!/bin/bash #!/bin/bash')
+      2. Any n-word phrase (2 to 16 words) repeated consecutively
+      3. Any sentence (>15 chars) repeated consecutively or 3+ times
     """
     import re
-    if len(text) < 30:
+    if len(text) < 15:
         return False
+
+    words = text.split()
+    if all(w.isdigit() for w in words):
+        return False
+
+    if len(words) >= 3 and len(words[-1]) >= 3 and words[-1].lower() == words[-2].lower() == words[-3].lower():
+        return True
+
+    max_n = min(len(words) // 2, 16)
+    for n in range(2, max_n + 1):
+        phrase = " ".join(words[-n:])
+        if len(phrase) >= 10 and [w.lower() for w in words[-n:]] == [w.lower() for w in words[-2 * n : -n]]:
+            return True
+
     sentences = [s.strip().lower() for s in re.split(r'[\.\n\?!]+', text) if len(s.strip()) > 15]
     if len(sentences) >= 2 and sentences[-1] == sentences[-2]:
         return True
     if len(sentences) >= 3 and sentences.count(sentences[-1]) >= 3:
         return True
+
     return False
 
 
 def _clean_repetitive_tail(text: str) -> str:
-    """If the trailing sentence is identical to the preceding sentence, trim the duplicate."""
+    """Trims trailing repetitive words, phrases, or sentences."""
     import re
+    words = text.split()
+    if len(words) >= 3 and words[-1].lower() == words[-2].lower() == words[-3].lower():
+        target = words[-1].lower()
+        while len(words) > 1 and words[-1].lower() == target:
+            words.pop()
+        return " ".join(words)
+
+    max_n = min(len(words) // 2, 16)
+    for n in range(max_n, 1, -1):
+        if [w.lower() for w in words[-n:]] == [w.lower() for w in words[-2 * n : -n]]:
+            return " ".join(words[:-n]).strip()
+
     sentences = re.split(r'(?<=[.!?\n])\s+', text)
     if len(sentences) >= 2:
         last = sentences[-1].strip().lower()
         prev = sentences[-2].strip().lower()
         if len(last) > 15 and last == prev:
             return " ".join(sentences[:-1]).strip()
+
     return text
 
 

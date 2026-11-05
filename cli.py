@@ -93,6 +93,8 @@ def run_cli(args):
                     title="[bold magenta]KANHA[/bold magenta]",
                     border_style="magenta",
                 ))
+            if getattr(args, "no_history", False):
+                engine.reset_memory()
         except Exception as e:
             console.print(f"[bold red]Error:[/bold red] {e}")
 
@@ -105,5 +107,6 @@ if __name__ == "__main__":
     parser.add_argument("--tools",  action="store_true", help="Enable agent tools")
     parser.add_argument("--temp", "--temperature", dest="temperature", type=float, default=None, help="Sampling temperature (e.g. 0.2)")
     parser.add_argument("--max_tokens", "--max_new_tokens", dest="max_new_tokens", type=int, default=None, help="Maximum new tokens to generate")
+    parser.add_argument("--no-history", "--no_history", dest="no_history", action="store_true", help="Disable conversation history memory")
     args = parser.parse_args()
     run_cli(args)

@@ -381,6 +381,27 @@ class InferenceEngine:
                 device=self.device,
             )
 
+        # Anti-echo check: if the model echoed the immediate previous assistant response verbatim
+        last_turn = None
+        for t in reversed(mem._turns):
+            if t.get("role") == "assistant" and t.get("content"):
+                last_turn = t["content"].strip().lower()
+                break
+        if last_turn and response and response.strip().lower() == last_turn:
+            log.warning("Detected exact repetition of previous assistant turn. Retrying with higher penalty.")
+            response = generate(
+                self.model,
+                self.tokenizer,
+                prompt,
+                max_new_tokens=gen_max_tokens,
+                temperature=min(gen_temp + 0.25, 0.7),
+                top_k=cfg.inference.top_k,
+                top_p=cfg.inference.top_p,
+                repetition_penalty=max(cfg.inference.repetition_penalty, 1.45),
+                stop_sequences=["\n### Instruction:", "### Instruction:", "### Conversation History:", "\nUser:", "\nHuman:"],
+                device=self.device,
+            )
+
         # 4. Safety filter
         try:
             from kanha.alignment.filters import filter_response

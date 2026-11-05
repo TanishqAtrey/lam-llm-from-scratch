@@ -43,10 +43,10 @@ memory:
 
 inference:
   max_new_tokens: 160         # 160 tokens (~120 words) for natural, conversational chat turns
-  temperature: 0.2            # low temp prevents sampling drift and runaway repetition in 42M model
+  temperature: 0.3            # balanced temp prevents sampling drift and repetitive copy-loops
   top_p: 0.9
   top_k: 20
-  repetition_penalty: 1.15
+  repetition_penalty: 1.35
 
 paths:
   base_model: "models/base/"

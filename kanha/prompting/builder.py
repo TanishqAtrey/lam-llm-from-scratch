@@ -81,6 +81,10 @@ class PromptBuilder:
             Formatted prompt string ready for tokenization
         """
         import re
+        # Idempotency check: if already formatted with canonical template markers, return directly
+        if instruction.startswith("### Instruction:\n") or instruction.startswith("### Conversation History:\n"):
+            return instruction
+
         # Normalise single-turn role prefixes (e.g. User: or Human:) and extract dialogue history if present
         if not memory_context and re.search(r'(?i)(?:^|\n)\s*(?:human|user|assistant)\s*:', instruction):
             history, inst = self.parse_dialogue(instruction)

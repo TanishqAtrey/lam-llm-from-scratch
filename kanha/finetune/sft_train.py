@@ -56,7 +56,7 @@ class SFTDataset(Dataset):
     memorize the instruction template.
     """
 
-    def __init__(self, data_path: str, tokenizer: KanhaTokenizer, max_len: int = 512):
+    def __init__(self, data_path: str, tokenizer: KanhaTokenizer, max_len: int = 1024):
         self.tokenizer = tokenizer
         self.max_len = max_len
         self.prompt_builder = PromptBuilder(include_rules=False)
@@ -224,25 +224,38 @@ def sft_train(args):
 
     # ── Dataset with train/val split ──
     model_max_len = getattr(model, "max_seq_len", getattr(getattr(model, "model", None), "max_seq_len", cfg.model.max_seq_len))
-    full_dataset = SFTDataset(args.data, tokenizer, max_len=model_max_len)
-    val_size = max(1, int(len(full_dataset) * val_fraction)) if len(full_dataset) > 10 else 0
-    train_size = len(full_dataset) - val_size
-    if val_size > 0 and train_size > 0:
-        train_dataset, val_dataset = torch.utils.data.random_split(
-            full_dataset, [train_size, val_size],
-            generator=torch.Generator().manual_seed(42),
-        )
+    val_data_path = getattr(args, "val_data", None)
+    if val_data_path and os.path.exists(val_data_path):
+        log.info(f"Loading separate validation dataset from {val_data_path}")
+        train_dataset = SFTDataset(args.data, tokenizer, max_len=model_max_len)
+        val_dataset = SFTDataset(val_data_path, tokenizer, max_len=model_max_len)
+        train_size = len(train_dataset)
+        val_size = len(val_dataset)
         val_loader = DataLoader(
             val_dataset, batch_size=args.batch_size,
             shuffle=False, drop_last=False, num_workers=0,
             collate_fn=sft_collate_fn,
         )
     else:
-        train_dataset = full_dataset
-        train_size = len(full_dataset)
-        val_dataset = None
-        val_size = 0
-        val_loader = None
+        full_dataset = SFTDataset(args.data, tokenizer, max_len=model_max_len)
+        val_size = max(1, int(len(full_dataset) * val_fraction)) if len(full_dataset) > 10 else 0
+        train_size = len(full_dataset) - val_size
+        if val_size > 0 and train_size > 0:
+            train_dataset, val_dataset = torch.utils.data.random_split(
+                full_dataset, [train_size, val_size],
+                generator=torch.Generator().manual_seed(42),
+            )
+            val_loader = DataLoader(
+                val_dataset, batch_size=args.batch_size,
+                shuffle=False, drop_last=False, num_workers=0,
+                collate_fn=sft_collate_fn,
+            )
+        else:
+            train_dataset = full_dataset
+            train_size = len(full_dataset)
+            val_dataset = None
+            val_size = 0
+            val_loader = None
 
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size,
@@ -377,6 +390,10 @@ def sft_train(args):
             f"Epoch {epoch+1} | Train Loss: {avg_train:.4f} | "
             f"Val Loss: {val_loss:.4f} | Best Val: {best_val_loss:.4f}"
         )
+
+        # Free GPU memory cache between epochs
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         # Save checkpoint each epoch
         ckpt_path = os.path.join(args.output, f"sft_epoch{epoch+1}.pt")

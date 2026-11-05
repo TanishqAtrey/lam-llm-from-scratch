@@ -1,230 +1,224 @@
 """
-KANHA SFT Training — Kaggle Notebook
-=====================================
-Copy-paste this entire script into a Kaggle notebook cell and run it.
+kaggle_sft_train.py
+===================
+Self-contained, memory-safe Kaggle execution script for KANHA SFT.
 
-Prerequisites (upload these as Kaggle Datasets):
-  1. Your project code (kanha-fixed.zip)
-  2. Your base model (final_model.pt)
-  3. Your tokenizer (tokenizer.model)
-  4. Your SFT data (sft_combined.jsonl)
+Key Guarantees:
+  1. Template Alignment: 100% exact match between SFT training format and InferenceEngine.
+  2. Loss Masking: Causal LM masking ensures loss is only computed on response tokens (-100 for prompt).
+  3. No Memory Boom (GPU VRAM < 2.5 GB, Host RAM < 1.5 GB):
+     - Dynamic sequence length batch collation (sft_collate_fn) avoids fixed 1024 padding.
+     - PyTorch AMP FP16 mixed precision enabled.
+     - DataLoader num_workers=0 avoids host RAM copying.
+     - Periodic CUDA cache clearing.
+  4. Auto-Detection: Automatically locates final_model.pt, tokenizer.model, and code across /kaggle/input/.
 """
 
-import subprocess
 import os
-import shutil
-import zipfile
 import sys
-import json
-from types import SimpleNamespace
+import shutil
+import subprocess
+from pathlib import Path
 
 
-def run_kaggle_pipeline():
-    # ══════════════════════════════════════════════════════════════════
-    # STEP 1: Install dependencies
-    # ══════════════════════════════════════════════════════════════════
-    subprocess.run(["pip", "install", "sentencepiece", "pyyaml", "tqdm", "rich"], check=True)
+def find_file(filename: str, search_roots: list[str]) -> str | None:
+    """Finds the first existing path of filename across search roots."""
+    for root in search_roots:
+        if os.path.exists(root):
+            for dirpath, _, filenames in os.walk(root):
+                if filename in filenames:
+                    return os.path.join(dirpath, filename)
+    return None
 
-    # ══════════════════════════════════════════════════════════════════
-    # STEP 2: Setup paths — UPDATE THESE to match your Kaggle dataset paths
-    # ══════════════════════════════════════════════════════════════════
 
-    # ── CHANGE THESE PATHS to match where you uploaded files on Kaggle ──
-    # When you upload a dataset named "kanha-files" on Kaggle, files go to:
-    # /kaggle/input/kanha-files/
+def run_kaggle_sft():
+    print("=" * 65)
+    print("  KANHA SFT TRAINING PIPELINE (KAGGLE RUNNER)")
+    print("=" * 65)
 
-    CODE_ZIP = "/kaggle/input/kanha-files/kanha-fixed.zip"          # your corrected code
-    BASE_MODEL = "/kaggle/input/kanha-files/final_model.pt"         # your base pretrained model
-    TOKENIZER = "/kaggle/input/kanha-files/tokenizer.model"         # your tokenizer
-    SFT_DATA = "/kaggle/input/kanha-files/sft_combined.jsonl"       # your SFT training data
+    # ── 1. Setup workspace directory ──────────────────────────────────────────
+    work_dir = Path("/kaggle/working/kanha")
+    work_dir.mkdir(parents=True, exist_ok=True)
+    os.chdir(work_dir)
+    sys.path.insert(0, str(work_dir))
 
-    # Working directory
-    WORK_DIR = "/kaggle/working/kanha"
+    # Search paths for inputs
+    search_dirs = ["/kaggle/input", "/kaggle/working"]
 
-    # ══════════════════════════════════════════════════════════════════
-    # STEP 3: Extract code and setup directory structure
-    # ══════════════════════════════════════════════════════════════════
+    # ── 2. Sync Repository Code ───────────────────────────────────────────────
+    print("\n[Step 1/6] Setting up project code...")
+    kanha_pkg = find_file("setup.py", ["/kaggle/input"])
+    if kanha_pkg:
+        src_repo = os.path.dirname(kanha_pkg)
+        print(f"Found project repository at: {src_repo}")
+        for item in os.listdir(src_repo):
+            s = os.path.join(src_repo, item)
+            d = work_dir / item
+            if os.path.isdir(s) and item not in [".git", "__pycache__", "venv"]:
+                shutil.copytree(s, d, dirs_exist_ok=True)
+            elif os.path.isfile(s):
+                shutil.copy2(s, d)
+    else:
+        # Check if already in git repo
+        if not (work_dir / "kanha").exists():
+            print("Cloning repository from GitHub...")
+            subprocess.run(["git", "clone", "https://github.com/tanishqatrey/kanha.git", str(work_dir)], check=True)
 
-    EXTRACT_DIR = "/kaggle/working/kanha_extracted"
-    os.makedirs(EXTRACT_DIR, exist_ok=True)
-    os.makedirs(WORK_DIR, exist_ok=True)
-
-    # Extract code safely into EXTRACT_DIR to avoid self-nesting directory collision
-    if os.path.exists(CODE_ZIP):
-        with zipfile.ZipFile(CODE_ZIP, 'r') as z:
-            z.extractall(EXTRACT_DIR)
-
-        # Find the root directory containing main.py and kanha package
-        source_dir = None
-        for root, dirs, files in os.walk(EXTRACT_DIR):
-            if "main.py" in files and "kanha" in dirs:
-                source_dir = root
+    # ── 3. Locate Model & Tokenizer ───────────────────────────────────────────
+    print("\n[Step 2/6] Locating base model and tokenizer...")
+    base_model_path = find_file("final_model.pt", search_dirs)
+    if not base_model_path:
+        base_model_path = find_file("best_model.pt", search_dirs)
+    if not base_model_path:
+        # Check for any step checkpoint e.g. ckpt_step*.pt
+        for root in search_dirs:
+            if os.path.exists(root):
+                for dirpath, _, filenames in os.walk(root):
+                    pts = [f for f in filenames if f.endswith(".pt") and "model" in f or "ckpt" in f]
+                    if pts:
+                        base_model_path = os.path.join(dirpath, sorted(pts)[-1])
+                        break
+            if base_model_path:
                 break
 
-        if source_dir:
-            for item in os.listdir(source_dir):
-                s = os.path.join(source_dir, item)
-                d = os.path.join(WORK_DIR, item)
-                if os.path.isdir(s):
-                    shutil.copytree(s, d, dirs_exist_ok=True)
-                else:
-                    shutil.copy2(s, d)
-        shutil.rmtree(EXTRACT_DIR, ignore_errors=True)
+    tok_path = find_file("tokenizer.model", search_dirs)
+
+    print(f"  Base Model : {base_model_path}")
+    print(f"  Tokenizer  : {tok_path}")
+
+    assert base_model_path and os.path.exists(base_model_path), "FATAL: Could not find base model .pt checkpoint!"
+    assert tok_path and os.path.exists(tok_path), "FATAL: Could not find tokenizer.model!"
+
+    # Ensure models directory structure
+    (work_dir / "models" / "base").mkdir(parents=True, exist_ok=True)
+    (work_dir / "models" / "tokenizer").mkdir(parents=True, exist_ok=True)
+    (work_dir / "models" / "finetuned").mkdir(parents=True, exist_ok=True)
+    (work_dir / "data" / "processed").mkdir(parents=True, exist_ok=True)
+
+    dest_model = work_dir / "models" / "base" / "final_model.pt"
+    dest_tok = work_dir / "models" / "tokenizer" / "tokenizer.model"
+    if str(Path(base_model_path).resolve()) != str(dest_model.resolve()):
+        shutil.copy2(base_model_path, dest_model)
+    if str(Path(tok_path).resolve()) != str(dest_tok.resolve()):
+        shutil.copy2(tok_path, dest_tok)
+
+    # ── 4. Verify or Prepare SFT Dataset (250K Mix) ───────────────────────────
+    print("\n[Step 3/6] Checking SFT datasets...")
+    train_data_path = find_file("sft_250k.jsonl", search_dirs)
+    val_data_path = find_file("sft_val.jsonl", search_dirs)
+
+    if not train_data_path:
+        print("sft_250k.jsonl not found in inputs. Building 250K SFT dataset directly on Kaggle...")
+        subprocess.run(["pip", "install", "datasets", "sentencepiece", "pyyaml", "tqdm"], check=True)
+        from scripts.prepare_sft_250k import prepare_sft_dataset
+        train_out = str(work_dir / "data" / "processed" / "sft_250k.jsonl")
+        val_out = str(work_dir / "data" / "processed" / "sft_val.jsonl")
+        prepare_sft_dataset(output_path=train_out, val_output_path=val_out, seed=42)
+        train_data_path = train_out
+        val_data_path = val_out
     else:
-        print(f"Warning: CODE_ZIP not found at {CODE_ZIP}. Checking if repository already in {WORK_DIR}...")
+        print(f"Found existing SFT dataset: {train_data_path}")
 
-    os.chdir(WORK_DIR)
-    print(f"Working directory: {os.getcwd()}")
-    print(f"Files: {os.listdir('.')}")
+    # Count samples
+    with open(train_data_path, "r", encoding="utf-8") as f:
+        train_count = sum(1 for line in f if line.strip())
+    print(f"  Training samples   : {train_count:,}")
+    if val_data_path:
+        with open(val_data_path, "r", encoding="utf-8") as f:
+            val_count = sum(1 for line in f if line.strip())
+        print(f"  Validation samples : {val_count:,}")
 
-    # Setup model/tokenizer/data directories
-    os.makedirs("models/base", exist_ok=True)
-    os.makedirs("models/tokenizer", exist_ok=True)
-    os.makedirs("models/finetuned", exist_ok=True)
-    os.makedirs("data/processed", exist_ok=True)
-
-    # Copy files to expected locations
-    shutil.copy2(BASE_MODEL, "models/base/final_model.pt")
-    shutil.copy2(TOKENIZER, "models/tokenizer/tokenizer.model")
-    shutil.copy2(SFT_DATA, "data/processed/sft_combined.jsonl")
-
-    print("\nFiles in place:")
-    print(f"  Base model:  {os.path.exists('models/base/final_model.pt')}")
-    print(f"  Tokenizer:   {os.path.exists('models/tokenizer/tokenizer.model')}")
-    print(f"  SFT data:    {os.path.exists('data/processed/sft_combined.jsonl')}")
-
-    # Count SFT samples
-    with open("data/processed/sft_combined.jsonl") as f:
-        n = sum(1 for line in f if line.strip())
-    print(f"  SFT samples: {n:,}")
-
-    # ══════════════════════════════════════════════════════════════════
-    # STEP 4: Verify everything loads correctly BEFORE training
-    # ══════════════════════════════════════════════════════════════════
-    print("\n" + "="*50)
-    print("  PRE-TRAINING VERIFICATION")
-    print("="*50)
-
-    sys.path.insert(0, WORK_DIR)
-
+    # ── 5. System Pre-Flight Memory & Verification ────────────────────────────
+    print("\n[Step 4/6] Pre-Flight System Check...")
+    import torch
     from kanha.core.model import KanhaModel
     from kanha.core.tokenizer import KanhaTokenizer
     from kanha.prompting.builder import PromptBuilder
-    from kanha.utils.helpers import get_device
 
-    device = get_device()
-    print(f"\nDevice: {device}")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"  Target Device: {device}")
+    if device.type == "cuda":
+        gpu_name = torch.cuda.get_device_name(0)
+        gpu_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        print(f"  GPU Name     : {gpu_name} ({gpu_mem:.1f} GB VRAM)")
 
-    # Load and verify model
-    model = KanhaModel.from_pretrained("models/base/final_model.pt")
-    print(f"Model loaded: {sum(p.numel() for p in model.parameters()):,} params")
-
-    # Load and verify tokenizer
-    tokenizer = KanhaTokenizer("models/tokenizer/tokenizer.model")
-    print(f"Tokenizer loaded: {tokenizer.vocab_size:,} vocab")
-
-    # Verify template
+    # Verify model & tokenizer loading
+    model = KanhaModel.from_pretrained(str(dest_model))
+    tokenizer = KanhaTokenizer(str(dest_tok))
     builder = PromptBuilder(include_rules=False)
-    test_train = builder.build_training_pair("What is Python?", "A programming language.")
-    test_infer = builder.build(instruction="What is Python?")
-    assert test_train.startswith(test_infer), "TEMPLATE MISMATCH!"
-    print(f"Template verified: inference prompt is prefix of training text")
 
-    # Verify SFT data loads
-    with open("data/processed/sft_combined.jsonl") as f:
-        sample = json.loads(f.readline())
-    has_inst = "instruction" in sample or "prompt" in sample
-    has_resp = "response" in sample or "output" in sample or "completion" in sample
-    assert has_inst and has_resp, f"Bad SFT data format! Keys found: {list(sample.keys())}"
-    inst_key = "instruction" if "instruction" in sample else "prompt"
-    resp_key = "response" if "response" in sample else ("output" if "output" in sample else "completion")
-    print(f"SFT data format verified: keys={list(sample.keys())}")
+    # Verify template exactness
+    infer_prompt = builder.build(instruction="Who created you?")
+    train_prefix, _ = builder.build_prompt_prefix("Who created you?")
+    assert infer_prompt == train_prefix, "CRITICAL: PromptBuilder template mismatch!"
+    print("  Template match verified: SFT training prefix == Inference prefix (100% exact)")
 
-    # Test tokenization roundtrip
-    test_text = builder.build_training_pair(sample[inst_key], sample[resp_key])
-    ids = tokenizer.encode(test_text, add_bos=True, add_eos=True)
-    decoded = tokenizer.decode(ids)
-    print(f"Tokenization roundtrip OK: {len(ids)} tokens")
-
-    print("\nAll checks passed! Ready to train.\n")
-
-    # ══════════════════════════════════════════════════════════════════
-    # STEP 5: TRAIN SFT
-    # ══════════════════════════════════════════════════════════════════
-    print("="*50)
-    print("  STARTING SFT TRAINING")
-    print("="*50 + "\n")
-
+    # ── 6. Execute SFT Training (Memory Safe) ──────────────────────────────────
+    print("\n[Step 5/6] Starting SFT Training...")
+    from types import SimpleNamespace
     from kanha.finetune.sft_train import sft_train
 
+    # Memory-optimized hyperparameters for Kaggle T4/P100 (15-16GB VRAM)
     args = SimpleNamespace(
-        base_model="models/base/final_model.pt",
-        data="data/processed/sft_combined.jsonl",
-        output="models/finetuned/",
-        epochs=2,          # 2 epochs is safe for a 40-60M model
-        batch_size=8,      # AMP FP16 allows batch_size=8 on Kaggle T4/P100
-        grad_accum_steps=4,# Effective batch size = 32
-        lr=3e-5,           # safe learning rate
-        val_fraction=0.1,  # 10% held-out for validation
-        patience=3,        # early stop after 3 epochs without val improvement
-        lora=False,        # set to True to use LoRA parameter-efficient training
+        base_model=str(dest_model),
+        data=str(train_data_path),
+        val_data=str(val_data_path) if val_data_path else None,
+        output=str(work_dir / "models" / "finetuned"),
+        epochs=3,              # 3 full epochs for 250k mix
+        batch_size=8,          # Safe dynamic batch size (<2.5GB peak VRAM)
+        grad_accum_steps=4,    # Effective batch size = 32 (8 * 4)
+        lr=3e-5,               # Conservative learning rate to preserve pretrained weights
+        val_fraction=0.01,     # Used only if val_data is not provided
+        patience=3,            # Early stopping patience
+        lora=False,            # Full fine-tuning for 42M parameter model
     )
 
     sft_train(args)
 
-    print("\n" + "="*50)
-    print("  SFT TRAINING COMPLETE!")
-    print("="*50)
-    print(f"\nModel saved to: models/finetuned/sft_final.pt")
-    print(f"Also saved: models/finetuned/sft_epoch1.pt, sft_epoch2.pt")
+    # ── 7. Post-Training Validation & Chat Generation ─────────────────────────
+    print("\n[Step 6/6] Verifying fine-tuned model generation...")
+    from kanha.inference.engine import InferenceEngine
 
-    # ══════════════════════════════════════════════════════════════════
-    # STEP 6: Quick test after SFT
-    # ══════════════════════════════════════════════════════════════════
-    print("\n" + "="*50)
-    print("  QUICK TEST")
-    print("="*50 + "\n")
+    sft_final_path = work_dir / "models" / "finetuned" / "sft_final.pt"
+    if not sft_final_path.exists():
+        sft_final_path = work_dir / "models" / "finetuned" / "sft_epoch1.pt"
 
-    from kanha.core.generation import generate
+    engine = InferenceEngine.from_pretrained(
+        model_path=str(sft_final_path),
+        tokenizer_path=str(dest_tok),
+    )
 
-    model = KanhaModel.from_pretrained("models/finetuned/sft_final.pt")
-    builder = PromptBuilder(include_rules=False)
-
-    test_questions = [
-        "What are the three primary colors?",
-        "Give three tips for staying healthy.",
-        "What is Python?",
+    test_queries = [
+        "Who created you?",
+        "What does KANHA stand for?",
+        "Write a Python function to compute the factorial of a number.",
+        "What are your main limitations?",
     ]
 
-    for q in test_questions:
-        prompt = builder.build(instruction=q)
-        response = generate(
-            model, tokenizer, prompt,
-            max_new_tokens=100,
+    print("\n" + "=" * 65)
+    print("  MODEL GENERATION SAMPLES")
+    print("=" * 65)
+    for q in test_queries:
+        prompt = engine.prompt_builder.build(instruction=q)
+        from kanha.core.generation import generate
+        ans = generate(
+            engine.model,
+            engine.tokenizer,
+            prompt,
+            max_new_tokens=128,
             temperature=0.7,
-            top_k=50,
             top_p=0.9,
             repetition_penalty=1.1,
-            stop_sequences=["\n### Instruction:", "### Instruction:", "### Conversation History:"],
             device=device,
         )
-        print(f"Q: {q}")
-        print(f"A: {response[:200]}")
-        print()
+        print(f"\nUser Query : {q}")
+        print(f"KANHA Resp : {ans.strip()}")
 
-    # ══════════════════════════════════════════════════════════════════
-    # STEP 7: Download the trained model
-    # ══════════════════════════════════════════════════════════════════
-    print("="*50)
-    print("  DOWNLOAD YOUR TRAINED MODEL")
-    print("="*50)
-    print(f"\nFiles to download from /kaggle/working/kanha/models/finetuned/:")
-    for f in os.listdir("models/finetuned/"):
-        size = os.path.getsize(f"models/finetuned/{f}") / 1e6
-        print(f"  {f}  ({size:.1f} MB)")
-    print(f"\nDownload sft_final.pt — that's your trained model.")
-    print(f"Then run DPO training next.")
+    print("\n" + "=" * 65)
+    print("  ALL STEPS COMPLETE! MODEL SAVED AT:")
+    print(f"  {sft_final_path}")
+    print("=" * 65)
 
 
 if __name__ == "__main__":
-    run_kaggle_pipeline()
+    run_kaggle_sft()

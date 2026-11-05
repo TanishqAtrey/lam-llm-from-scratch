@@ -56,6 +56,8 @@ def main():
     ft_p.add_argument("--grad_accum_steps", type=int, default=4,
                        help="Gradient accumulation steps (default 4)")
     ft_p.add_argument("--lr",         type=float, default=3e-5)
+    ft_p.add_argument("--val_data", default=None,
+                       help="Optional path to dedicated validation JSONL file")
     ft_p.add_argument("--val_fraction", type=float, default=0.1,
                        help="Fraction of data for validation (default 0.1)")
     ft_p.add_argument("--patience", type=int, default=3,
